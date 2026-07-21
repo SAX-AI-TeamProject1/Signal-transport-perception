@@ -2,3 +2,5 @@
 ultralytics
 opencv-python
 numpy
+roboflow
+python-dotenv
