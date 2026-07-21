@@ -1,0 +1,67 @@
+{
+    "version": "2.0.0",
+    "tasks": [
+        {
+            "label": "1. 패키지 일괄 설치 (.venv + requirements)",
+            "type": "shell",
+            "options": {
+                "cwd": "${workspaceFolder}"
+            },
+            "linux": {
+                "command": "bash",
+                "args": [
+                    "-c",
+                    "(command -v python3.12 >/dev/null && python3.12 -m venv .venv || python3 -m venv .venv) && .venv/bin/pip install -q --upgrade pip && .venv/bin/pip install -r requirements.txt"
+                ]
+            },
+            "osx": {
+                "command": "bash",
+                "args": [
+                    "-c",
+                    "(command -v python3.12 >/dev/null && python3.12 -m venv .venv || python3 -m venv .venv) && .venv/bin/pip install -q --upgrade pip && .venv/bin/pip install -r requirements.txt"
+                ]
+            },
+            "windows": {
+                "command": "cmd",
+                "args": [
+                    "/d",
+                    "/c",
+                    "(py -3.12 -m venv .venv || python -m venv .venv) && .venv\\Scripts\\pip install -q --upgrade pip && .venv\\Scripts\\pip install -r requirements.txt"
+                ]
+            },
+            "group": {
+                "kind": "build",
+                "isDefault": true
+            },
+            "presentation": {
+                "reveal": "always",
+                "panel": "shared"
+            },
+            "problemMatcher": []
+        },
+        {
+            "label": "2. 날짜 자동찍기 (Last updated 헤더 일괄 갱신)",
+            "type": "shell",
+            "options": {
+                "cwd": "${workspaceFolder}"
+            },
+            "linux": {
+                "command": ".venv/bin/python",
+                "args": ["tools/update_date_header.py"]
+            },
+            "osx": {
+                "command": ".venv/bin/python",
+                "args": ["tools/update_date_header.py"]
+            },
+            "windows": {
+                "command": ".venv\\Scripts\\python.exe",
+                "args": ["tools/update_date_header.py"]
+            },
+            "presentation": {
+                "reveal": "always",
+                "panel": "shared"
+            },
+            "problemMatcher": []
+        }
+    ]
+}

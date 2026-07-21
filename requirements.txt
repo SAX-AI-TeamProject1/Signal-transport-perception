@@ -1,0 +1,4 @@
+# YOLO obstacle-classification environment (vehicle-mounted camera)
+ultralytics
+opencv-python
+numpy
