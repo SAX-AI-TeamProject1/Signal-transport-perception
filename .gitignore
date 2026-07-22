@@ -223,3 +223,6 @@ CLAUDE.md
 data/
 runs/
 *.pt
+
+
+*.DS_Store

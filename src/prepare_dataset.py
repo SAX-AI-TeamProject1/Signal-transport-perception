@@ -1,4 +1,4 @@
-# Last updated: 2026-07-21
+# Last updated: 2026-07-23
 
 import os
 from pathlib import Path
@@ -6,9 +6,10 @@ from pathlib import Path
 from dotenv import load_dotenv
 from roboflow import Roboflow
 
+# https://universe.roboflow.com/arvist-igsvq/warehouse-management
+
 # ROBOFLOW_API_KEY 값을 환경변수로 등록
 load_dotenv("env/roboflow-api.txt")
-
 
 WORKSPACE = "arvist-igsvq"
 PROJECT = "warehouse-management"
