@@ -1,7 +1,11 @@
 # Last updated: 2026-07-23
 
+from pathlib import Path
+
 from ultralytics import YOLO
 import torch
+
+REPO_ROOT = Path(__file__).resolve().parents[1]
 DATA_YAML = "data/dataset/data.yaml"
 MODEL = "yolov8n.pt"
 EPOCHS = 50
@@ -22,7 +26,11 @@ def main() -> None :
         epochs = EPOCHS,
         imgsz = IMG_SIZE,
         batch = BATCH,
-        device= get_device()         # GPU 가속
+        device= get_device(),        # GPU 가속
+        # ultralytics folds a relative `project` back under its own global runs_dir setting,
+        # so this must be absolute to actually land inside the repo.
+        project = str(REPO_ROOT / "data" / "runs"),
+        name = "train",
     )
 
 

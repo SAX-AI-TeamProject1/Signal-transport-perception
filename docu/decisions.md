@@ -46,9 +46,31 @@ Last updated: 2026-07-21
 - **배경**: 프로젝트 전반이 리포 루트에서 스크립트를 실행하는 컨벤션을 따르고 있음(`tools/update_date_header.py`, VS Code 태스크의 `cwd`가 모두 `${workspaceFolder}`).
 - **결정**: 모든 소스코드는 `src/` 아래에 작성하고, 항상 리포 루트에서 `python src/xxx.py` 형태로 실행한다. `data/dataset/dataset.yaml`의 `path`도 리포 루트 기준 상대경로(`data/dataset`)를 사용한다.
 
+## ADR-007 학습 데이터 소스: 실사진(COCO/Roboflow) → Gazebo 자체 렌더링
+
+- **배경**: 로봇은 Gazebo(navi_factory 월드, AWS RoboMaker 창고 에셋)에서만 시뮬레이션되는데, 지금까지 학습 데이터는 전부 실사진(COCO) 또는 실사진 기반 공개 데이터셋(Roboflow warehouse-management)이었다. 처음엔 이 갭을 Blender로 에셋을 오프라인 렌더링해서 메우려 했으나(`render_gazebo_assets.py`), 실제 Gazebo 화면으로 검증해보니 Blender로 학습한 모델의 confidence가 0.98대에서 0.27~0.46대로 떨어지고 중복/헐렁한 박스가 발생했다 — Blender와 Gazebo 렌더러(조명·텍스처 처리)가 서로 달라 도메인 갭이 그대로 남아있었기 때문. 또한 Blender 5.x의 Collada 임포터 제거, assimp 변환 중 재질 투과율 오작동, 텍스처 상대경로 깨짐 등 렌더러 자체와 무관한 변환 버그도 여러 번 발생했다.
+- **결정**: 학습 이미지를 Gazebo 자체 카메라 센서로 직접 캡처한다(`capture_gazebo_dataset.py`). `worlds/navi_factory/navi_factory.sdf`(실제 로봇 시뮬레이션에 쓰이는 월드)는 절대 건드리지 않고, 클래스마다 별도의 빈 월드를 이 레포의 `data/raw/gazebo_capture/_worlds/`에 즉석에서 생성해 스폰·촬영·종료한다. 카메라는 고정하고 대상 오브젝트의 자체 yaw 회전 + 카메라 정면축 위 거리 이동으로 스윕한다(카메라가 물체 주위를 도는 것과 기하학적으로 동일).
+- **근거**: 실제 배포 시 로봇이 보는 렌더러·조명을 그대로 학습에 쓰는 게 가장 근본적인 도메인 일치 방법이고, DAE를 변환 없이 그대로 읽으므로 Blender 파이프라인에서 겪은 변환 버그 자체가 발생할 여지가 없다.
+- **한계**: 라벨(바운딩박스)은 각 메시의 Blender 측정치(半-extent)를 기반으로 투영 계산하는데, Blender 임포트본과 Gazebo 네이티브 렌더 사이에 치수가 미세하게 달라(예: PalletJackB_01 손잡이 끝부분이 살짝 박스 밖으로 나감) 1.2배 여유값(padding)으로 보정했다. 일부 클래스(예: ClutteringA_01처럼 비정형 박스 더미)는 근거리·특정 각도에서 라벨이 다소 느슨하거나 물체 일부를 놓칠 수 있음 — 지금은 허용 가능한 수준으로 판단하고 넘어감, 필요해지면 재검토.
+
+## ADR-008 클래스 구성 재정리: 에셋 단위(6종) → 의미 단위(4종)
+
+- **배경**: ADR-007 캡처 스크립트가 처음엔 `PalletJackB_01, Bucket_01, ClutteringA_01, ClutteringC_01, ClutteringD_01, TrashCanC_01`처럼 AWS RoboMaker 에셋 파일명(버전 접미사 포함)을 그대로 클래스로 썼다. 그런데 `ClutteringA/C/D_01`는 전부 "잡동사니 더미"라는 같은 개념이고, ADR-004의 행동 판단 로직상 이런 "그 외" 오브젝트는 어차피 크기 기반으로 동일하게 처리되므로 세 클래스로 쪼갤 이유가 없다는 지적이 있었음.
+- **결정**: 물리적으로 서로 다른 3D 메시(캡처 시엔 하나씩 따로 스폰해야 함)와, 라벨에 실제로 쓰는 의미 클래스를 분리한다. `capture_gazebo_dataset.py`의 `MESH_GEOMETRY`(메시별 치수)와 `SEMANTIC_CLASSES`(최종 4클래스: `PalletJack, Bucket, Cluttering, TrashCan`)로 나눠서, 여러 메시가 하나의 class_id로 묶여 라벨링되게 했다. `prepare_dataset.py`도 폴더명이 아니라 라벨 파일에 적힌 class_id로 그룹핑하도록 수정.
+- **근거**: 클래스가 적어질수록 클래스당 학습 데이터(형태 다양성)가 늘어나고(`Cluttering`은 이제 324장, 메시 3종의 다양한 형태를 봄), 이 프로젝트의 행동 판단 로직이 애초에 요구하지 않는 세밀함을 클래스 taxonomy에 넣지 않게 된다. ADR-003의 "COCO 80클래스를 그대로 쓴다"는 결정과는 배경이 다르다 — 거긴 "인식 다양성 최대화"가 목적이었고, 여긴 "에셋 파일명이라는 구현 디테일이 클래스로 새어나가지 않게" 하는 정리다.
+
+## ADR-009 학습 실행 위치: 로컬(MPS) → Kaggle(GPU)
+
+- **배경**: 로컬 M4 Mac(MPS)으로 648장/50epoch 학습이 약 32분 걸려 반복 실험하기엔 느리다는 피드백이 있었음. 이미 이 프로젝트용 Kaggle 노트북(`heojaeseong/yolo-percep`)이 있었는데, 원래는 Roboflow에서 직접 데이터를 받아 학습하는 구조였음(ADR-002의 Roboflow 단계 유물).
+- **결정**: `data/dataset/`을 Kaggle Dataset(`heojaeseong/yolo-gazebo-capture`)으로 업로드하고, 노트북에서 Roboflow 다운로드 로직을 제거해 이 데이터셋을 직접 참조하도록 교체. T4 GPU로 같은 50epoch가 약 7분에 끝남.
+- **주의사항**: `prepare_dataset.py`가 생성하는 `data.yaml`의 `path`는 로컬 절대경로라서, Kaggle에 그대로 올리면 컨테이너 안에서 그 경로를 못 찾아 실패한다(1차 시도 때 실제로 겪음) — 노트북 쪽에서 `path`를 `/kaggle/input/<dataset>`으로 재작성하는 셀을 앞에 추가해서 해결. 데이터셋을 다른 환경에 옮길 때마다 반복될 수 있는 문제라 기억해둘 것.
+- **한계**: Kaggle 학습은 사람이 노트북을 열어 수동으로 트리거하는 방식은 아니고 `kaggle kernels push`로 트리거하지만, 여전히 로컬 `.venv`가 아니라 Kaggle 계정/API 인증이 필요하다 — 팀원이 재현하려면 각자 Kaggle 계정과 `kaggle` CLI 인증이 필요함.
+
 ## 아직 정해지지 않은 것
 
 - ADR-004의 크기 임계값 및 바운딩박스+라이다 거리 결합 공식
 - ADR-004의 fail-safe(애매하면 기본 회피) 반영 여부
 - ADR-005의 ROS 2 출력 인터페이스(토픽명, 메시지 타입, 좌표계)
-- 도메인 갭 보강을 위한 실촬영 데이터 추가 시점 및 방법
+- ADR-007: 사람(person) 모델이 아직 navi_factory 월드에 없음 — Signal-Simulation 쪽에 추가 필요
+- ADR-007: 클래스별 라벨 박스 정밀도(특히 비정형 클러터 오브젝트) 개선 여부
+- ADR-009: 로컬/Kaggle 중 어느 쪽을 "기본" 학습 경로로 삼을지, 아니면 데이터 규모에 따라 상황별로 판단할지

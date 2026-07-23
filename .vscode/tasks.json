@@ -64,7 +64,33 @@
             "problemMatcher": []
         },
         {
-            "label": "3. 데이터셋 다운로드 (prepare_dataset.py)",
+            "label": "3. Gazebo 데이터셋 캡처 (capture_gazebo_dataset.py)",
+            "detail": "Gazebo 자체 렌더러로 창고 오브젝트 6종을 촬영해 data/raw/gazebo_capture/에 이미지+라벨을 만듭니다. 일반 .venv가 아니라 Gazebo 파이썬 바인딩이 연결된 .venv-gz를 씁니다 — 최초 1회 'python3.12 -m venv --system-site-packages .venv-gz && .venv-gz/bin/pip install protobuf pillow numpy'로 준비.",
+            "type": "shell",
+            "options": {
+                "cwd": "${workspaceFolder}"
+            },
+            "linux": {
+                "command": ".venv-gz/bin/python",
+                "args": ["src/capture_gazebo_dataset.py"]
+            },
+            "osx": {
+                "command": ".venv-gz/bin/python",
+                "args": ["src/capture_gazebo_dataset.py"]
+            },
+            "windows": {
+                "command": ".venv-gz\\Scripts\\python.exe",
+                "args": ["src/capture_gazebo_dataset.py"]
+            },
+            "presentation": {
+                "reveal": "always",
+                "panel": "shared"
+            },
+            "problemMatcher": []
+        },
+        {
+            "label": "4. 데이터셋 분할 (prepare_dataset.py)",
+            "detail": "Gazebo 캡처 결과를 train/val로 나누고 data/dataset/data.yaml을 만듭니다.",
             "type": "shell",
             "options": {
                 "cwd": "${workspaceFolder}"
@@ -88,7 +114,7 @@
             "problemMatcher": []
         },
         {
-            "label": "4. 모델 학습 (train.py)",
+            "label": "5. 모델 학습 (train.py)",
             "type": "shell",
             "options": {
                 "cwd": "${workspaceFolder}"
@@ -112,7 +138,7 @@
             "problemMatcher": []
         },
         {
-            "label": "5. 추론 실행 (infer.py)",
+            "label": "6. 추론 실행 (infer.py)",
             "type": "shell",
             "options": {
                 "cwd": "${workspaceFolder}"
@@ -128,6 +154,30 @@
             "windows": {
                 "command": ".venv\\Scripts\\python.exe",
                 "args": ["src/infer.py"]
+            },
+            "presentation": {
+                "reveal": "always",
+                "panel": "shared"
+            },
+            "problemMatcher": []
+        },
+        {
+            "label": "7. 추론 테스트 GUI (test_gui.py)",
+            "type": "shell",
+            "options": {
+                "cwd": "${workspaceFolder}"
+            },
+            "linux": {
+                "command": ".venv/bin/python",
+                "args": ["src/test_gui.py"]
+            },
+            "osx": {
+                "command": ".venv/bin/python",
+                "args": ["src/test_gui.py"]
+            },
+            "windows": {
+                "command": ".venv\\Scripts\\python.exe",
+                "args": ["src/test_gui.py"]
             },
             "presentation": {
                 "reveal": "always",
