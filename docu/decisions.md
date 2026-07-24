@@ -65,6 +65,7 @@ Last updated: 2026-07-21
 - **결정**: `data/dataset/`을 Kaggle Dataset(`heojaeseong/yolo-gazebo-capture`)으로 업로드하고, 노트북에서 Roboflow 다운로드 로직을 제거해 이 데이터셋을 직접 참조하도록 교체. T4 GPU로 같은 50epoch가 약 7분에 끝남.
 - **주의사항**: `prepare_dataset.py`가 생성하는 `data.yaml`의 `path`는 로컬 절대경로라서, Kaggle에 그대로 올리면 컨테이너 안에서 그 경로를 못 찾아 실패한다(1차 시도 때 실제로 겪음) — 노트북 쪽에서 `path`를 `/kaggle/input/<dataset>`으로 재작성하는 셀을 앞에 추가해서 해결. 데이터셋을 다른 환경에 옮길 때마다 반복될 수 있는 문제라 기억해둘 것.
 - **한계**: Kaggle 학습은 사람이 노트북을 열어 수동으로 트리거하는 방식은 아니고 `kaggle kernels push`로 트리거하지만, 여전히 로컬 `.venv`가 아니라 Kaggle 계정/API 인증이 필요하다 — 팀원이 재현하려면 각자 Kaggle 계정과 `kaggle` CLI 인증이 필요함.
+- **기본 경로 확정**: 실제 학습(정식 50epoch)은 **Kaggle을 기본으로** 한다 — `prepare_dataset.py`가 분할 후 자동으로 데이터셋을 업로드하도록 만들어놨으니 로컬보다 손이 더 안 간다. `src/train.py`(로컬 MPS)는 인터넷이 없거나 코드 변경 자체를 1~2epoch로 빠르게 스모크테스트할 때만 쓴다.
 
 ## 아직 정해지지 않은 것
 
@@ -73,4 +74,3 @@ Last updated: 2026-07-21
 - ADR-005의 ROS 2 출력 인터페이스(토픽명, 메시지 타입, 좌표계)
 - ADR-007: 사람(person) 모델이 아직 navi_factory 월드에 없음 — Signal-Simulation 쪽에 추가 필요
 - ADR-007: 클래스별 라벨 박스 정밀도(특히 비정형 클러터 오브젝트) 개선 여부
-- ADR-009: 로컬/Kaggle 중 어느 쪽을 "기본" 학습 경로로 삼을지, 아니면 데이터 규모에 따라 상황별로 판단할지

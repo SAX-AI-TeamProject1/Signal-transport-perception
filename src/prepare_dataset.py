@@ -1,4 +1,4 @@
-# Last updated: 2026-07-23
+# Last updated: 2026-07-24
 '''
 capture_gazebo_dataset.py의 결과물을 YOLO train/val 데이터셋으로 분할한다.
 
@@ -7,12 +7,19 @@ data/raw/gazebo_capture/<클래스>/{images,labels}/ (capture_gazebo_dataset.py 
     data/dataset/{train,val}/{images,labels}/
     data/dataset/data.yaml
 
+분할이 끝나면 곧바로 전체 데이터셋을 Kaggle Dataset으로 업로드한다(한 장씩이 아니라 한 번에
+통째로 — 캡처 중간에 조금씩 올리면 네트워크 왕복 때문에 느려지고, train/val 분할도 전체를
+다 모아야 가능해서 어차피 끝나고 한 번에 올려야 한다). 업로드를 건너뛰려면 --skip-upload.
+
 리포 루트에서 프로젝트 .venv로 실행 (Gazebo 전용 .venv-gz 아님):
-    .venv/bin/python src/prepare_dataset.py
+    .venv/bin/python src/prepare_dataset.py [--skip-upload]
 '''
 
+import json
 import random
 import shutil
+import subprocess
+import sys
 from pathlib import Path
 
 import yaml
@@ -21,6 +28,7 @@ RAW_DIR = Path("data/raw/gazebo_capture")
 DATASET_DIR = Path("data/dataset")
 TRAIN_RATIO = 0.8
 SEED = 42
+KAGGLE_DATASET_SLUG = "heojaeseong/yolo-gazebo-capture"
 
 
 # capture_gazebo_dataset.py가 써둔 classes.txt에서 클래스 이름 목록(=클래스 ID 순서)을 읽는다.
@@ -83,7 +91,38 @@ def write_data_yaml(class_names: list[str]) -> None:
     (DATASET_DIR / "data.yaml").write_text(yaml.safe_dump(data_yaml, allow_unicode=True, sort_keys=False))
 
 
-# 클래스 목록 로드 -> train/val 분할 -> 복사 -> data.yaml 생성까지 전체 파이프라인을 순서대로 실행한다.
+# data/dataset/ 전체(train.zip, val.zip, data.yaml)를 Kaggle Dataset 하나로 통째로 업로드한다.
+# 이미 있으면 새 버전으로 갱신(version), 처음이면 새로 생성(create) — 둘 다 시도해서 판단한다.
+def upload_to_kaggle() -> None:
+    metadata_path = DATASET_DIR / "dataset-metadata.json"
+    metadata_path.write_text(json.dumps({
+        "title": "yolo-gazebo-capture",
+        "id": KAGGLE_DATASET_SLUG,
+        "licenses": [{"name": "CC0-1.0"}],
+    }, indent=2))
+
+    kaggle_bin = str(Path(sys.executable).parent / "kaggle")  # .venv/bin/python 옆의 kaggle CLI
+
+    version_result = subprocess.run(
+        [kaggle_bin, "datasets", "version", "-p", str(DATASET_DIR), "-m", "auto-update from prepare_dataset.py",
+         "--dir-mode", "zip"],
+        capture_output=True, text=True,
+    )
+    if version_result.returncode == 0:
+        print("Kaggle Dataset 버전 갱신 완료:", KAGGLE_DATASET_SLUG)
+        return
+
+    create_result = subprocess.run(
+        [kaggle_bin, "datasets", "create", "-p", str(DATASET_DIR), "--dir-mode", "zip"],
+        capture_output=True, text=True,
+    )
+    if create_result.returncode != 0:
+        print("Kaggle 업로드 실패:", version_result.stderr.strip(), create_result.stderr.strip(), file=sys.stderr)
+        return
+    print("Kaggle Dataset 새로 생성 완료:", KAGGLE_DATASET_SLUG)
+
+
+# 클래스 목록 로드 -> train/val 분할 -> 복사 -> data.yaml 생성 -> Kaggle 업로드까지 순서대로 실행한다.
 def main() -> None:
     class_names = read_class_names()
     train_pairs, val_pairs = split_dataset()
@@ -92,6 +131,9 @@ def main() -> None:
     write_data_yaml(class_names)
     print(f"train: {len(train_pairs)} images, val: {len(val_pairs)} images")
     print(f"data.yaml: {(DATASET_DIR / 'data.yaml').resolve()}")
+
+    if "--skip-upload" not in sys.argv:
+        upload_to_kaggle()
 
 
 if __name__ == "__main__":

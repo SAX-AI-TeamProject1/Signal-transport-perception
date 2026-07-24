@@ -1,10 +1,10 @@
-# Last updated: 2026-07-23
+# Last updated: 2026-07-24
 
 import sys
 
 from ultralytics import YOLO
 
-WEIGHTS = "data/runs/train/weights/best.pt"
+WEIGHTS = "data/runs/train-kaggle/weights/best.pt"
 
 def load_model(weights : str = WEIGHTS) -> YOLO:
     return YOLO(weights)

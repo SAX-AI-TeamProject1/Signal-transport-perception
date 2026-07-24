@@ -89,8 +89,8 @@
             "problemMatcher": []
         },
         {
-            "label": "4. 데이터셋 분할 (prepare_dataset.py)",
-            "detail": "Gazebo 캡처 결과를 train/val로 나누고 data/dataset/data.yaml을 만듭니다.",
+            "label": "4. 데이터셋 분할 + Kaggle 업로드 (prepare_dataset.py)",
+            "detail": "Gazebo 캡처 결과를 train/val로 나누고 data/dataset/data.yaml을 만든 뒤, Kaggle Dataset(heojaeseong/yolo-gazebo-capture)으로 자동 업로드합니다. 업로드를 건너뛰려면 args에 --skip-upload 추가.",
             "type": "shell",
             "options": {
                 "cwd": "${workspaceFolder}"
@@ -114,7 +114,37 @@
             "problemMatcher": []
         },
         {
-            "label": "5. 모델 학습 (train.py)",
+            "label": "5. 모델 학습 - Kaggle (기본)",
+            "detail": "kaggle/yolo-percep 노트북을 Kaggle GPU에서 실행하고, 완료될 때까지 상태를 폴링한 뒤 결과(weights/로그)를 data/runs/train-kaggle/로 받아옵니다. ~7분 소요. ADR-009에 따라 정식 학습은 이걸 기본으로 씀.",
+            "type": "shell",
+            "options": {
+                "cwd": "${workspaceFolder}"
+            },
+            "linux": {
+                "command": "bash",
+                "args": ["tools/train_kaggle.sh"]
+            },
+            "osx": {
+                "command": "bash",
+                "args": ["tools/train_kaggle.sh"]
+            },
+            "windows": {
+                "command": "cmd",
+                "args": [
+                    "/d",
+                    "/c",
+                    ".venv\\Scripts\\kaggle kernels push -p kaggle/yolo-percep && .venv\\Scripts\\kaggle kernels status heojaeseong/yolo-percep && echo COMPLETE될 때까지 이 태스크를 수동으로 재실행하세요 && .venv\\Scripts\\kaggle kernels output heojaeseong/yolo-percep -p data/runs/train-kaggle"
+                ]
+            },
+            "presentation": {
+                "reveal": "always",
+                "panel": "shared"
+            },
+            "problemMatcher": []
+        },
+        {
+            "label": "6. 모델 학습 - 로컬 스모크테스트 (train.py)",
+            "detail": "인터넷이 없거나 train.py 코드 변경 자체를 빠르게 확인할 때만 사용 — 정식 학습은 위 Kaggle 태스크를 쓸 것 (ADR-009).",
             "type": "shell",
             "options": {
                 "cwd": "${workspaceFolder}"
@@ -138,7 +168,7 @@
             "problemMatcher": []
         },
         {
-            "label": "6. 추론 실행 (infer.py)",
+            "label": "7. 추론 실행 (infer.py)",
             "type": "shell",
             "options": {
                 "cwd": "${workspaceFolder}"
@@ -162,7 +192,7 @@
             "problemMatcher": []
         },
         {
-            "label": "7. 추론 테스트 GUI (test_gui.py)",
+            "label": "8. 추론 테스트 GUI (test_gui.py)",
             "type": "shell",
             "options": {
                 "cwd": "${workspaceFolder}"
