@@ -1,4 +1,4 @@
-# Last updated: 2026-07-23
+# Last updated: 2026-07-28
 '''
 Gazebo 자체 렌더러로 YOLO 학습 데이터셋을 캡처한다.
 

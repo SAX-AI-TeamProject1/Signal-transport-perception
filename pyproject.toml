@@ -1,0 +1,21 @@
+[project]
+name = "Signal-transport-perception"
+version = "0.1.0"
+description = "차량 탑재 카메라 YOLO 장애물 인식 (사람/사물 구분 → 정지/회피 판단)"
+requires-python = ">=3.12,<3.13"
+dependencies = [
+    "ultralytics==8.4.108",
+    "opencv-python==5.0.0.93",
+    "numpy==2.3.5",
+    "roboflow==1.4.0",
+    "python-dotenv==1.2.2",
+    "pillow==12.3.0",
+    "kaggle==2.2.4",
+]
+
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools]
+packages = ["src"]
