@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-# Last updated: 2026-07-23
+# Last updated: 2026-07-28
 """Stamp/refresh a '# Last updated: YYYY-MM-DD' header on Python files.
 
 Usage:

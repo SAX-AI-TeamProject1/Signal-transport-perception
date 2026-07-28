@@ -1,4 +1,4 @@
-# Last updated: 2026-07-24
+# Last updated: 2026-07-28
 '''
 capture_gazebo_dataset.py의 결과물을 YOLO train/val 데이터셋으로 분할한다.
 
