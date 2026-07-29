@@ -1,9 +1,12 @@
 # YOLO obstacle-classification environment (vehicle-mounted camera)
-ultralytics
-opencv-python
-numpy
-roboflow
-python-dotenv
-pillow
-kaggle
+# opencv-python/numpy pinned to the same OpenCV 4.x / numpy 1.x line other
+# team repos use (mediapipe requires numpy<2 and opencv-contrib-python) —
+# letting these float to latest previously dragged in opencv-python 5.x,
+# which forces numpy>=2 and made this repo's env incompatible with theirs.
+ultralytics==8.4.108
+opencv-python==4.11.0.86
+numpy==1.26.4
+python-dotenv==1.2.2
+pillow==12.3.0
+kaggle==2.2.4
 
