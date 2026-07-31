@@ -214,6 +214,32 @@
                 "panel": "shared"
             },
             "problemMatcher": []
+        },
+        {
+            "label": "9. 학습된 모델 받기 (fetch_model.py)",
+            "detail": "재학습 없이 Kaggle heojaeseong/yolo-percep 커널의 마지막 완료된 출력(weights/best.pt)만 받아 data/runs/train-kaggle/에 배치합니다.",
+            "type": "shell",
+            "options": {
+                "cwd": "${workspaceFolder}"
+            },
+            "linux": {
+                "command": ".venv/bin/python",
+                "args": ["tools/fetch_model.py"]
+            },
+            "osx": {
+                "command": ".venv/bin/python",
+                "args": ["tools/fetch_model.py"]
+            },
+            "windows": {
+                "command": ".venv\\Scripts\\python.exe",
+                "args": ["tools/fetch_model.py"]
+            },
+            "presentation": {
+                "reveal": "always",
+                "panel": "shared"
+            },
+            "problemMatcher": []
+
         }
     ]
 }
