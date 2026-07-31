@@ -1,4 +1,4 @@
-# Last updated: 2026-07-28
+# Last updated: 2026-08-01
 '''
 capture_gazebo_dataset.py의 결과물을 YOLO train/val 데이터셋으로 분할한다.
 
@@ -69,10 +69,15 @@ def split_dataset() -> tuple[list, list]:
     return train_pairs, val_pairs
 
 
-# 이미지/라벨 쌍을 data/dataset/<split>/{images,labels}/로 실제 복사한다.
+# 이미지/라벨 쌍을 data/dataset/<split>/{images,labels}/로 실제 복사한다. 매번 지우고 새로
+# 채운다 — 안 지우면 이전 실행에서 남은 파일(다른 idx 범위, 다른 train/val 배정)이 계속 쌓여서
+# Kaggle에 올라가는 zip까지 오염된다(실제로 겪음: 재캡처 후에도 옛 스케일 이미지가 안 없어져서
+# 재학습 결과가 이전과 거의 동일하게 나왔었음).
 def write_split(pairs: list[tuple[Path, Path]], split_name: str) -> None:
     images_dir = DATASET_DIR / split_name / "images"
     labels_dir = DATASET_DIR / split_name / "labels"
+    shutil.rmtree(images_dir, ignore_errors=True)
+    shutil.rmtree(labels_dir, ignore_errors=True)
     images_dir.mkdir(parents=True, exist_ok=True)
     labels_dir.mkdir(parents=True, exist_ok=True)
     for image_path, label_path in pairs:

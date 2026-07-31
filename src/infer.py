@@ -1,13 +1,11 @@
-# Last updated: 2026-07-28
-
-import sys
+# Last updated: 2026-07-31
 
 from ultralytics import YOLO
 
-WEIGHTS = "data/runs/train-kaggle/weights/best.pt"
+from weights import resolve_weights
 
-def load_model(weights : str = WEIGHTS) -> YOLO:
-    return YOLO(weights)
+def load_model(weights : str | None = None) -> YOLO:
+    return YOLO(weights or str(resolve_weights()))
 
 def predict(model : YOLO, source: str):
     return model.predict(source=source)
