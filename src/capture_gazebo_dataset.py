@@ -1,4 +1,4 @@
-# Last updated: 2026-07-23
+# Last updated: 2026-07-31
 '''
 Gazebo 자체 렌더러로 YOLO 학습 데이터셋을 캡처한다.
 
@@ -7,12 +7,22 @@ Blender로 학습한 모델의 confidence가 0.98대에서 0.3 정도로 뚝 떨
 나와서, 로봇이 실제로 보게 될 조명/렌더러를 그대로 쓰기 위해 gz sim의 카메라 센서로 직접
 학습 이미지를 뽑는다.
 
+라벨(바운딩박스)은 더 이상 메시 half-extent를 손으로 측정해 투영 계산하지 않는다. gz-sim이
+자체 제공하는 `boundingbox_camera` 센서(+ `gz-sim-label-system` 플러그인)를 각 RGB 카메라와
+동일한 pose로 같이 띄워서, 렌더러가 직접 계산한 픽셀 단위 박스를 그대로 읽어 쓴다 — 이 프로젝트는
+Blender를 쓰지 않으므로, 새 클래스를 추가할 때도 메시 치수를 별도로 측정할 필요가 없다.
+
+카메라 거리/높이(예전엔 메시별 half-extent로 미리 계산해둔 "반지름"·"중심 높이" 상수)도 더 이상
+사람이 채워 넣지 않는다. `calibrate_target()`이 캡처 시작 직전에 boundingbox_camera 피드백만
+보면서 (1) 물체가 프레임에 들어올 때까지 거리를 좁히고 (2) 세로 중앙에 오도록 높이를 보정하고
+(3) 목표 프레임 비율이 되도록 거리를 다시 맞추는 짧은 루프를 돌려 실측한다. 그래서 새 클래스를
+등록할 때 필요한 정보는 "어떤 메시를 스폰할지"뿐이다.
+
 클래스마다 즉석에서 생성한 일회용 Gazebo 월드(바닥 + 태양광 + 고정 높이 카메라 3개 + 대상
 오브젝트 하나)를 띄운다 — worlds/navi_factory/(Signal-Simulation의 실제 시뮬레이션 월드)는
 이 스크립트가 절대 읽거나 쓰지 않는다. 카메라는 고정해두고 대신 대상 오브젝트 자체의 yaw
 회전과 카메라 정면축 위 거리를 스윕한다(카메라가 고정된 물체 주위를 도는 것과 기하학적으로
-동일). 각 프레임의 YOLO 라벨은 오브젝트의 알려진 pose/크기와 카메라의 알려진 intrinsics로
-자동 계산한다 — 수동 라벨링 없음.
+동일).
 
 Gazebo 파이썬 바인딩이 필요한데 프로젝트 .venv 밖에 있다. 최초 1회 설정:
     python3.12 -m venv --system-site-packages .venv-gz
@@ -29,6 +39,7 @@ import time
 from pathlib import Path
 
 import numpy as np
+from gz.msgs10.annotated_axis_aligned_2d_box_v_pb2 import AnnotatedAxisAligned2DBox_V
 from gz.msgs10.boolean_pb2 import Boolean
 from gz.msgs10.image_pb2 import Image
 from gz.msgs10.pose_pb2 import Pose
@@ -40,46 +51,89 @@ SIM_MODELS_DIR = REPO_ROOT.parent / "Signal-Simulation" / "worlds" / "navi_facto
 OUT_DIR = REPO_ROOT / "data" / "raw" / "gazebo_capture"
 WORLDS_DIR = OUT_DIR / "_worlds"  # 클래스별 일회용 월드 생성 위치 — navi_factory.sdf 아님
 
-# 실제 3D 메시 자산(에셋 폴더명 기준) — 물리적으로 서로 다른 지오메트리라 캡처 시엔
-# 하나씩 따로 스폰해야 하지만, 행동 판단(ADR-004)에선 "그 외 오브젝트 → 크기 기반 판단"으로
-# 어차피 동일하게 처리되므로 여러 메시가 같은 의미 클래스로 묶일 수 있다 — 예를 들어
-# ClutteringA/C/D_01은 전부 "잡동사니 더미"라는 같은 개념이라 별도 클래스로 쪼갤 이유가 없고,
-# 오히려 하나로 합치면 클래스당 학습 데이터(형태 다양성)만 늘어난다.
-#
-# (의미 클래스, 카메라 거리 스케일링용 바운딩스피어 반지름, 라벨박스용 축별 half-extent,
-# 수직 중심 높이) — 반지름/half-extent/높이는 전부 미터 단위, 이전 Blender 작업 때 각
-# 메시의 bound_box로 측정해서 재사용(실시간 bbox 조회 대신). 반지름을 모든 축에 동일하게
-# half-extent로 쓰면 라벨이 심하게 커진다(실제로 프레임 전체를 채우는 박스가 나오는 걸
-# 확인함) — 딱 맞는 박스를 위해선 축별 실제 half-extent가 필요하다.
-MESH_GEOMETRY = {
-    # mesh_name:         (semantic_class, radius, half_x, half_y, half_z, center_z)
-    "PalletJackB_01": ("PalletJack", 0.797, 0.576, 0.266, 0.482, 0.482),
-    "Bucket_01": ("Bucket", 1.042, 0.471, 0.609, 0.702, 0.707),
-    "ClutteringA_01": ("Cluttering", 1.554, 1.073, 0.991, 0.529, 0.573),
-    "ClutteringC_01": ("Cluttering", 1.604, 0.885, 1.024, 0.862, 0.862),
-    "ClutteringD_01": ("Cluttering", 1.164, 0.498, 0.751, 0.738, 0.737),
-    "TrashCanC_01": ("TrashCan", 1.060, 0.723, 0.446, 0.634, 0.672),
+# 자체 model.sdf가 있어 <include>로 통째로 스폰 가능한 에셋(키 = Signal-Simulation의
+# worlds/navi_factory/models/ 아래 실제 폴더명) → semantic_class. 카메라 거리/높이는 더 이상
+# 여기 적어두지 않는다 — calibrate_target()이 실시간으로 알아낸다.
+PACKAGE_MESHES = {
+    "aws_robomaker_warehouse_PalletJackB_01": "PalletJack",
+    "aws_robomaker_warehouse_Bucket_01": "Bucket",
+    "aws_robomaker_warehouse_ClutteringA_01": "Cluttering",
+    "aws_robomaker_warehouse_ClutteringC_01": "Cluttering",
+    "aws_robomaker_warehouse_ClutteringD_01": "Cluttering",
+    "aws_robomaker_warehouse_TrashCanC_01": "TrashCan",
 }
-TARGET_MESHES = list(MESH_GEOMETRY)
+
+# 자체 model.sdf가 없는 순수 메시 에셋(navi_factory.sdf가 이 오브젝트들을 실제로 배치할 때 쓰는
+# <visual> 구성을 그대로 재사용한다 — mesh 경로/visual pose 모두 Signal-Simulation의
+# navi_factory.sdf에서 그대로 가져온 값). navi_factory.sdf에서 이 오브젝트들은 전부
+# <static>true</static> 배경 소품으로 배치돼 있어 물리 충돌이 필요 없으므로 별도 collision은
+# 만들지 않는다. (semantic_class, mesh 상대경로, visual pose) — 카메라 거리/높이는 여기 없음.
+RAW_MESH_MESHES = {
+    # mesh_name:      (semantic_class, mesh 상대경로,                        visual pose)
+    "StandingPerson": ("Person", "StandingPerson/meshes/standing.dae", "0 0 0.02 0.04 0 0"),
+    "WalkingPerson": ("Person", "WalkingPerson/meshes/walking.dae", "0 0 0.02 0.04 0 0"),
+    "CasualFemale": ("Person", "CasualFemale/meshes/casual_female.dae", "0 0 0.02 0.04 0 0"),
+    "Forklift": ("Vehicle", "Forklift/base_visual.glb", "0 0 0 0 0 0"),
+}
+
+TARGET_MESHES = list(PACKAGE_MESHES) + list(RAW_MESH_MESHES)
 
 # 최종 YOLO 클래스(순서가 곧 class_id) — 여러 메시가 하나의 의미 클래스로 합쳐진 목록.
-SEMANTIC_CLASSES = ["PalletJack", "Bucket", "Cluttering", "TrashCan"]
-
-# 라벨박스 여유값: 위 half-extent는 Blender로 임포트(DAE->OBJ 변환)한 메시 기준이라 Gazebo
-# 네이티브 렌더보다 살짝 작게 나온다(예: PalletJackB_01의 긴 손잡이가 잘림) — 완벽히
-# 맞추려 하지 않고 패딩으로 보정한다.
-BOX_PADDING = 1.2
+# 기존 4개 뒤에 새 클래스를 추가해 기존 class_id(0~3)는 그대로 유지한다.
+SEMANTIC_CLASSES = ["PalletJack", "Bucket", "Cluttering", "TrashCan", "Person", "Vehicle"]
 
 IMG_SIZE = 640
 HFOV = 1.05  # 라디안 — 아래 SDF의 카메라 <horizontal_fov>와 반드시 일치해야 함
 CAMERAS = [("camera_low", 0.6), ("camera_mid", 1.0), ("camera_high", 1.5)]
-DISTANCE_MULTIPLIERS = [1.5, 2.5, 4.0]
+CALIBRATION_CAMERA = "camera_mid"  # 거리/높이 캘리브레이션 기준 카메라
+TARGET_FILL = 0.5  # 캘리브레이션 목표: 박스 세로 길이가 프레임의 이 비율을 채우도록
+DISTANCE_RATIOS = [0.7, 1.0, 1.6]  # 캘리브레이션된 기준 거리에 대한 근/중/원 배율
 YAW_STEPS = 12
+MIN_BOX_PIXELS = 4  # 이보다 작은 박스(거의 안 보이는 프레임)는 노이즈로 버린다
 
 
-# 클래스 하나 + 고정 카메라 3대짜리 일회용 Gazebo 월드의 SDF 문자열을 만든다.
-def world_sdf(class_name: str, world_name: str) -> str:
-    mesh_uri = f"file://{SIM_MODELS_DIR}/aws_robomaker_warehouse_{class_name}"
+def semantic_class_of(mesh_name: str) -> str:
+    if mesh_name in PACKAGE_MESHES:
+        return PACKAGE_MESHES[mesh_name]
+    return RAW_MESH_MESHES[mesh_name][0]
+
+
+# 대상 오브젝트 하나를 스폰하는 SDF 조각을 만든다. class_id는 gz-sim-label-system 플러그인에
+# 그대로 박아서, boundingbox_camera가 이 오브젝트를 그 라벨로 리포트하게 한다.
+def target_sdf(mesh_name: str, class_id: int) -> str:
+    label_plugin = f"""
+      <plugin filename="gz-sim-label-system" name="gz::sim::systems::Label">
+        <label>{class_id}</label>
+      </plugin>"""
+
+    if mesh_name in PACKAGE_MESHES:
+        mesh_uri = f"file://{SIM_MODELS_DIR}/{mesh_name}"
+        return f"""
+    <include>
+      <uri>{mesh_uri}</uri>
+      <name>target</name>
+      <pose>2 0 0 0 0 0</pose>{label_plugin}
+    </include>"""
+
+    _, mesh_relpath, visual_pose = RAW_MESH_MESHES[mesh_name]
+    return f"""
+    <model name="target">
+      <static>true</static>
+      <pose>2 0 0 0 0 0</pose>
+      <link name="link">
+        <visual name="visual">
+          <pose>{visual_pose}</pose>
+          <geometry>
+            <mesh><uri>model://{mesh_relpath}</uri></mesh>
+          </geometry>
+        </visual>
+      </link>{label_plugin}
+    </model>"""
+
+
+# 클래스 하나 + 고정 카메라 3대짜리 일회용 Gazebo 월드의 SDF 문자열을 만든다. 카메라마다 RGB
+# 이미지용 camera 센서와, 자동 라벨용 boundingbox_camera 센서를 같은 pose로 짝지어 넣는다.
+def world_sdf(mesh_name: str, world_name: str, class_id: int) -> str:
     cameras_xml = "\n".join(
         f"""
     <model name="{name}">
@@ -96,6 +150,18 @@ def world_sdf(class_name: str, world_name: str) -> str:
           <update_rate>10</update_rate>
           <visualize>false</visualize>
           <topic>{name}</topic>
+        </sensor>
+        <sensor name="bbox" type="boundingbox_camera">
+          <camera>
+            <box_type>visible_2d</box_type>
+            <horizontal_fov>{HFOV}</horizontal_fov>
+            <image><width>{IMG_SIZE}</width><height>{IMG_SIZE}</height></image>
+            <clip><near>0.1</near><far>50</far></clip>
+          </camera>
+          <always_on>true</always_on>
+          <update_rate>10</update_rate>
+          <visualize>false</visualize>
+          <topic>{name}_bbox</topic>
         </sensor>
       </link>
     </model>"""
@@ -129,11 +195,7 @@ def world_sdf(class_name: str, world_name: str) -> str:
         <visual name="v"><geometry><plane><normal>0 0 1</normal><size>10 10</size></plane></geometry></visual>
       </link>
     </model>
-    <include>
-      <uri>{mesh_uri}</uri>
-      <name>target</name>
-      <pose>2 0 0 0 0 0</pose>
-    </include>
+{target_sdf(mesh_name, class_id)}
 {cameras_xml}
   </world>
 </sdf>
@@ -155,67 +217,109 @@ def set_target_pose(node: Node, world_name: str, distance: float, center_z: floa
 
 
 # 지정한 카메라 토픽에서 프레임 한 장을 구독해 받아오고, numpy 배열로 변환해 반환한다.
-def capture_frame(node: Node, camera_topic: str) -> np.ndarray:
+# gz-transport 구독이 간헐적으로 한 번 씹히는 경우가 있어(수백 장 캡처하다 보면 실제로 발생),
+# 몇 번 재시도한 뒤에도 안 오면 그때 포기한다.
+def capture_frame(node: Node, camera_topic: str, retries: int = 3) -> np.ndarray:
+    for attempt in range(retries):
+        received = {}
+        node.subscribe(Image, f"/{camera_topic}", lambda msg: received.setdefault("msg", msg))
+        t0 = time.time()
+        while "msg" not in received and time.time() - t0 < 5:
+            time.sleep(0.02)
+        node.unsubscribe(f"/{camera_topic}")
+        if "msg" in received:
+            msg = received["msg"]
+            return np.frombuffer(msg.data, dtype=np.uint8).reshape((msg.height, msg.width, 3))
+        print(f"  (재시도 {attempt + 1}/{retries}) {camera_topic}에서 프레임 수신 실패")
+    raise TimeoutError(f"no frame from {camera_topic} after {retries} attempts")
+
+
+# 지정한 boundingbox_camera 토픽에서 class_id 라벨이 붙은 박스를 찾아 YOLO 정규화 좌표로 반환한다.
+# gz-sim 렌더러가 직접 계산한 픽셀 박스이므로, 이 프로젝트는 더 이상 메시 half-extent를 투영
+# 계산하지 않는다.
+def capture_bbox(node: Node, bbox_topic: str, class_id: int) -> tuple | None:
     received = {}
-    sub = node.subscribe(Image, f"/{camera_topic}", lambda msg: received.setdefault("msg", msg))
+    node.subscribe(
+        AnnotatedAxisAligned2DBox_V, f"/{bbox_topic}", lambda msg: received.setdefault("msg", msg)
+    )
     t0 = time.time()
     while "msg" not in received and time.time() - t0 < 5:
         time.sleep(0.02)
-    node.unsubscribe(f"/{camera_topic}")
+    node.unsubscribe(f"/{bbox_topic}")
     if "msg" not in received:
-        raise TimeoutError(f"no frame from {camera_topic}")
-    msg = received["msg"]
-    return np.frombuffer(msg.data, dtype=np.uint8).reshape((msg.height, msg.width, 3))
-
-
-def yolo_label(
-    distance: float, center_z: float, camera_z: float, yaw: float, half_x: float, half_y: float, half_z: float
-) -> tuple | None:
-    '''
-    대상의 회전된 바운딩박스를 고정 카메라의 이미지 평면에 투영해 YOLO 라벨을 계산한다.
-
-    카메라 몸체 좌표계: +X가 정면(대상 방향), +Y가 왼쪽, +Z가 위 — 생성된 카메라들의
-    회전 없는(identity) 자세와 일치한다. 대상은 메시의 실제 축별 half-extent 크기의
-    박스이며, 자체 yaw만큼 회전해서 (distance, 0, center_z)에 위치한다.
-    '''
-    focal = (IMG_SIZE / 2) / math.tan(HFOV / 2)
-    cx = cy = IMG_SIZE / 2
-
-    us, vs = [], []
-    for sx in (-half_x, half_x):
-        for sy in (-half_y, half_y):
-            for sz in (-half_z, half_z):
-                # 모서리 점을 yaw만큼 회전시킨 뒤 월드/카메라 좌표계로 배치
-                wx = distance + sx * math.cos(yaw) - sy * math.sin(yaw)
-                wy = 0.0 + sx * math.sin(yaw) + sy * math.cos(yaw)
-                wz = center_z + sz - camera_z
-
-                if wx <= 0.05:
-                    continue  # 카메라 뒤쪽이거나 카메라 위치와 겹침
-                us.append(cx - focal * (wy / wx))
-                vs.append(cy - focal * (wz / wx))
-
-    if not us:
-        return None
-    x_min, x_max = max(0.0, min(us)), min(IMG_SIZE, max(us))
-    y_min, y_max = max(0.0, min(vs)), min(IMG_SIZE, max(vs))
-    if x_max <= x_min or y_max <= y_min:
         return None
 
-    box_cx, box_cy = (x_min + x_max) / 2 / IMG_SIZE, (y_min + y_max) / 2 / IMG_SIZE
-    box_w, box_h = (x_max - x_min) / IMG_SIZE, (y_max - y_min) / IMG_SIZE
-    return box_cx, box_cy, box_w, box_h
+    for annotated in received["msg"].annotated_box:
+        if annotated.label != class_id:
+            continue
+        x_min = max(0.0, annotated.box.min_corner.x)
+        y_min = max(0.0, annotated.box.min_corner.y)
+        x_max = min(float(IMG_SIZE), annotated.box.max_corner.x)
+        y_max = min(float(IMG_SIZE), annotated.box.max_corner.y)
+        if x_max - x_min < MIN_BOX_PIXELS or y_max - y_min < MIN_BOX_PIXELS:
+            continue
+        box_cx, box_cy = (x_min + x_max) / 2 / IMG_SIZE, (y_min + y_max) / 2 / IMG_SIZE
+        box_w, box_h = (x_max - x_min) / IMG_SIZE, (y_max - y_min) / IMG_SIZE
+        return box_cx, box_cy, box_w, box_h
+    return None
+
+
+# 메시 크기를 사람이 미리 재두지 않고, boundingbox_camera 피드백만 보면서 실시간으로
+# (지면 위 중심 높이, 기준 거리)를 찾는다.
+#   1) 물체가 기준 카메라 프레임에 들어올 때까지 거리를 좁혀 들어간다.
+#   2) 박스가 세로 중앙에 오도록 높이를 보정한다(원근 비례로 근사 조정, 몇 번 반복해 수렴).
+#   3) 박스 세로 길이가 TARGET_FILL 비율이 되도록 거리를 다시 맞춘다.
+def calibrate_target(node: Node, world_name: str, class_id: int) -> tuple[float, float]:
+    camera_z = dict(CAMERAS)[CALIBRATION_CAMERA]
+    bbox_topic = f"{CALIBRATION_CAMERA}_bbox"
+    z = camera_z  # 초기 추정치: 기준 카메라 높이 근처에서 시작
+    distance = 8.0
+
+    box = None
+    for _ in range(12):
+        set_target_pose(node, world_name, distance, z, 0.0)
+        time.sleep(0.05)
+        box = capture_bbox(node, bbox_topic, class_id)
+        if box is not None and box[3] >= 0.08:
+            break
+        distance *= 0.75
+        if distance < 0.2:
+            break
+    if box is None:
+        raise RuntimeError(f"calibration failed: target(class {class_id}) never entered frame")
+
+    for _ in range(6):
+        set_target_pose(node, world_name, distance, z, 0.0)
+        time.sleep(0.05)
+        box = capture_bbox(node, bbox_topic, class_id)
+        if box is None:
+            break
+        error = box[1] - 0.5  # box_cy가 0.5보다 크면(프레임 아래쪽) 물체를 더 높여야 한다
+        if abs(error) < 0.04:
+            break
+        z += error * distance
+
+    for _ in range(6):
+        set_target_pose(node, world_name, distance, z, 0.0)
+        time.sleep(0.05)
+        box = capture_bbox(node, bbox_topic, class_id)
+        if box is None or box[3] <= 0:
+            break
+        distance *= box[3] / TARGET_FILL
+        if abs(box[3] - TARGET_FILL) < 0.05:
+            break
+
+    return z, distance
 
 
 # 메시 하나에 대해 월드를 띄우고 카메라x거리x각도 조합을 전부 스윕하며 캡처+라벨링한다.
 # 라벨에 쓰는 class_id는 이 메시가 속한 의미 클래스(SEMANTIC_CLASSES) 기준이다.
 def capture_mesh(mesh_name: str, class_id: int) -> int:
-    _, radius, half_x, half_y, half_z, center_z = MESH_GEOMETRY[mesh_name]
     world_name = f"capture_{mesh_name.lower()}"
 
     WORLDS_DIR.mkdir(parents=True, exist_ok=True)
     sdf_path = WORLDS_DIR / f"{mesh_name}.sdf"
-    sdf_path.write_text(world_sdf(mesh_name, world_name))
+    sdf_path.write_text(world_sdf(mesh_name, world_name, class_id))
 
     env = os.environ.copy()
     env["GZ_SIM_RESOURCE_PATH"] = f"{env.get('GZ_SIM_RESOURCE_PATH', '')}:{SIM_MODELS_DIR}"
@@ -230,6 +334,7 @@ def capture_mesh(mesh_name: str, class_id: int) -> int:
     try:
         time.sleep(3)  # 월드 로드 + 센서 플러그인 기동 대기
         node = Node()
+        center_z, base_distance = calibrate_target(node, world_name, class_id)
 
         # 이미지는 메시별 폴더에 저장(디버깅 시 구분 쉽게), 라벨의 class_id만 의미 클래스로 합쳐짐
         images_dir = OUT_DIR / mesh_name / "images"
@@ -239,23 +344,27 @@ def capture_mesh(mesh_name: str, class_id: int) -> int:
 
         written = 0
         idx = 0
-        for camera_topic, camera_z in CAMERAS:
-            for multiplier in DISTANCE_MULTIPLIERS:
-                distance = multiplier * radius
+        for camera_topic, _ in CAMERAS:
+            for ratio in DISTANCE_RATIOS:
+                distance = ratio * base_distance
                 for step in range(YAW_STEPS):
                     yaw = 2 * math.pi * step / YAW_STEPS
                     set_target_pose(node, world_name, distance, center_z, yaw)
                     time.sleep(0.05)
 
-                    label = yolo_label(
-                        distance, center_z, camera_z, yaw,
-                        half_x * BOX_PADDING, half_y * BOX_PADDING, half_z * BOX_PADDING,
-                    )
+                    label = capture_bbox(node, f"{camera_topic}_bbox", class_id)
                     if label is None:
                         idx += 1
                         continue
 
-                    frame = capture_frame(node, camera_topic)
+                    try:
+                        frame = capture_frame(node, camera_topic)
+                    except TimeoutError as e:
+                        # 센서 구독이 간헐적으로 씹히는 정도로는 프레임 하나만 건너뛰고
+                        # 나머지 스윕(이 메시의 남은 각도/거리, 그리고 다음 메시들)은 계속 진행한다.
+                        print(f"  프레임 {idx:04d} 건너뜀: {e}")
+                        idx += 1
+                        continue
                     stem = f"{mesh_name}_{idx:04d}"
                     PILImage.fromarray(frame).save(images_dir / f"{stem}.png")
                     (labels_dir / f"{stem}.txt").write_text(
@@ -278,10 +387,15 @@ def main() -> None:
     for mesh_name in TARGET_MESHES:
         if mesh_name not in meshes:
             continue
-        semantic_class = MESH_GEOMETRY[mesh_name][0]
+        semantic_class = semantic_class_of(mesh_name)
         class_id = SEMANTIC_CLASSES.index(semantic_class)
-        count = capture_mesh(mesh_name, class_id)
-        print(f"{mesh_name} ({semantic_class}): {count} images")
+        try:
+            count = capture_mesh(mesh_name, class_id)
+            print(f"{mesh_name} ({semantic_class}): {count} images")
+        except Exception as e:
+            # 메시 하나가 통째로 실패해도(예: 캘리브레이션 실패) 나머지 메시는 계속 캡처한다 —
+            # 이미 끝난 메시들 데이터를 날리고 처음부터 다시 돌릴 필요가 없게.
+            print(f"{mesh_name} ({semantic_class}): 실패 — {e}")
 
 
 if __name__ == "__main__":
