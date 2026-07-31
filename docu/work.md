@@ -1,5 +1,28 @@
 # 날짜 별 작업 현황
 
+## 2026.07.31 (트랙 추종)
+- navi_factory 월드 스크린샷을 보고 새 요구사항 확인: 로봇이 바닥의 주황색 대시라인 트랙을 보고 자율주행(코너 포함)해야 함. 스크린샷에 원형 패드(출발/적재)·콘+원형 마커(경유지)·직선/대각선 대시라인이 섞여 있어 단순 라인 추종이 아니라 분기점·반환점·목표지점이 있는 실제 라우팅 네트워크임을 확인
+- 설계 결정(ADR-011): 인식은 YOLO 대신 HSV 색상 threshold 기반 센터라인 검출(코너에서 부드러운 곡선을 위해), 라우팅(분기 선택/반환/목표 판단)은 Signal-Simulation이 이미 웨이포인트 순서를 알고 있다고 보고 그쪽 책임으로 분리 — 이 레포는 "눈앞 트랙 오프셋+곡률"만 인식
+- 여러 차량이 트랙을 가리거나 헷갈리게 하는 문제 제기 → 기존 YOLO 탐지 결과(Vehicle/Person 박스)를 트랙 색상 마스크에서 빼는 방식으로 해결
+- `src/track_follow.py` 신규 작성: `track_color_mask`(HSV+장애물 마스킹), `select_own_track`(화면 하단 중앙에 맞닿은 연결성분만 선택 — 무관한 다른 차선 무시), `fit_curve`(가까운~먼 밴드로 나눠 2차 다항식 피팅), `estimate_track`(offset/curvature/confidence + 프레임 간 평활화·분기 오인 억제)
+- HSV 임계값은 실제 Gazebo(ogre2) 렌더로 track_ne_entry_1을 스폰해 캡처한 프레임에서 픽셀을 직접 샘플링해 캘리브레이션 — 그림자 진 면도 색상/채도는 유지되고 명도만 낮아짐을 확인
+- 합성 이미지로 스트레스 테스트: 트랙에 바로 맞닿아 겹치는 가짜 오브젝트가 있을 때 마스킹 없이는 offset 0.20(틀림)+confidence 1.0(거짓 확신)로 나오다가, obstacle_boxes로 마스킹하면 offset≈0(정답)+confidence 0.46으로 정상화됨을 확인
+- 미완료: ROS 2 출력 인터페이스(프로젝트 전체 미정, ADR-005)와 실제 시뮬레이션 라이브 연동 검증은 다음으로 미룸 — 이번엔 순수 인식 함수(이미지→오프셋/곡률)까지만
+
+## 2026.07.31
+- Signal-Simulation의 navi_factory 월드 현황 재확인: ADR-007에 "person 모델 없음"으로 미해결 기록했던 것과 달리, 실제로는 `StandingPerson/WalkingPerson/CasualFemale`(사람)과 `Forklift`(차량)가 이미 배치돼 있음을 확인 — 해당 미해결 항목 해소
+- 새 클래스를 추가하려면 기존 `MESH_GEOMETRY`의 half-extent 값을 Blender로 측정해야 하는데, 이 프로젝트는 Blender를 안 쓰기로 한 상태(`render_gazebo_assets.py` 자체가 예전에 삭제됨)라 측정 수단이 없다는 문제 제기가 있었음
+- gz-sim(Harmonic 8.14)에 내장된 `boundingbox_camera` 센서 + `gz-sim-label-system` 플러그인으로 `src/capture_gazebo_dataset.py`의 라벨링 방식을 통째로 교체(ADR-010): 렌더러가 직접 계산한 픽셀 단위 박스를 그대로 쓰므로 메시 측정이 아예 필요 없어짐. `yolo_label()` 삼각함수 투영, half_x/half_y/half_z, 1.2배 패딩 보정 전부 제거
+- 자체 model.sdf가 없는 raw 메시(Person 3종, Forklift)는 navi_factory.sdf가 이미 쓰고 있는 `<visual>` 구성(mesh 경로, pose)을 그대로 재사용해 스폰하도록 `RAW_MESH_MESHES` 신설. `Vehicle` 후보였던 `OGV`는 collision 정의가 아예 없고 인스턴스별 스케일도 제각각이라 이번엔 제외, `Forklift`만 우선 등록
+- 클래스를 4개(PalletJack/Bucket/Cluttering/TrashCan) → 6개(+ Person, Vehicle)로 확장. 기존 class_id(0~3)는 그대로 유지
+- 검증: `TrashCanC_01`(기존 패키지형 클래스)로 회귀 캡처해 기존과 동등(더 타이트)하게 동작함을 확인, `StandingPerson`/`Forklift`(신규 raw-mesh 클래스)도 각각 캡처해 픽셀 단위로 딱 맞는 박스가 나옴을 시각적으로 확인
+- 1차로는 라벨 계산만 자동화하고 카메라 거리/높이(반지름, 중심 높이)는 메시별 상수로 남겨뒀는데, "그게 무슨 자동화냐"는 피드백을 받고 이것도 마저 없앰 — `calibrate_target()`이 boundingbox_camera 피드백만 보고 거리를 좁혀 들어가며 프레임 진입을 확인 → 높이를 세로 중앙에 맞게 보정 → 목표 프레임 비율로 거리 재조정, 이 3단계 루프로 실시간 캘리브레이션. 첫 구현은 높이 보정 부호가 반대라 물체가 하늘 위로 발산하는 버그가 있었음(디버깅 중 발견, 부호 수정 후 재검증 완료)
+- 이제 새 클래스 등록에 필요한 정보는 "어떤 메시를 스폰할지"뿐 — `TrashCanC_01`/`Bucket_01`(회귀) + `StandingPerson`/`Forklift`(신규) 전부 재검증 통과
+- 전체 10개 메시(6클래스) 정식 재캡처 완료(108장씩 총 1080장). 도중 `camera_low`에서 프레임 수신이 한 번 씹혔는데 재시도 로직이 정상 복구함(하드닝 효과 확인)
+- `prepare_dataset.py` 실행 시 1728장으로 잡혀서 확인해보니, 세션 전에 남아있던 접두사 없는 옛 폴더(`Bucket_01`, `ClutteringA_01` 등 6개, 이전 라벨링 방식의 잔재)가 새 접두사 폴더와 같이 잡힌 것 — 옛 폴더 삭제 후 재분할해 정상적으로 1080장(train 862/val 218)으로 정리
+- Kaggle 재학습(50epoch) 완료: 전체 mAP50 0.985 / mAP50-95 0.955. 클래스별로는 Bucket/Cluttering/TrashCan/Person/Vehicle 전부 mAP50-95 0.96대 이상(Person이 0.992로 최고 — boundingbox_camera 자동 라벨링 정확도가 그대로 반영된 것으로 보임)인데, **PalletJack만 0.838로 확실히 처짐**
+- 학습 스윕에 없던 각도로 스팟체크: Forklift(Vehicle) 0.98/0.98, StandingPerson(Person) 0.95/0.96로 우수. 반면 PalletJack은 confidence 0.75, 다른 각도에선 아예 박스가 2개(0.77+0.39)로 쪼개지는 중복 탐지 발생 — 얇고 튀어나온 파츠(핸들, 포크 두 갈래)가 많은 형태 특성으로 추정. 심각하진 않지만(recall 자체는 학습 시 1.0) 실사용 시 참고 필요 — 개선(각도 다양화 재캡처/재학습)은 이번엔 보류하고 다음으로 넘기기로 함
+
 ## 2026.07.24
 - `data/runs/train-kaggle/weights/best.pt`(4클래스, Kaggle 학습본)를 학습 스윕에 없던 각도/거리로 스팟체크: PalletJack(yaw 52°, 3.1배) 0.94 / Cluttering(ClutteringD_01, yaw 110°, 1.9배) 0.96 / Bucket(yaw 200°, 3.4배) 0.95 — 전부 단일·정확한 박스로 검출. 특히 Cluttering은 메시 3종(A/C/D) 중 하나로 테스트해도 잘 잡혀서, 클래스 합치기(ADR-008)가 일반화를 해치지 않았음을 확인
 - 검증 이미지를 `docu/spotchecks/2026-07-24_{palletjack,cluttering,bucket}.png`로 리포에 보존(스크래치패드는 세션 종료 시 사라지므로)

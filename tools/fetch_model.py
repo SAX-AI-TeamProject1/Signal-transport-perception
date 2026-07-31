@@ -9,7 +9,7 @@ fetch_model.py
 tools/train_kaggle.sh는 "학습 트리거와 완료대기 받기"를 다 하지만 배포 시점엔 이미 학습이
 끝나 있으므로 "받기"만 필요하다.
 '''
-
+import os
 import shutil
 import subprocess
 import sys
@@ -25,7 +25,8 @@ def main()->None:
     tmp_dir = Path(tempfile.mkdtemp())
 
     # kenels output : 재학습 안 하고 마지막으로 완료된 실행의 산출물
-    subprocess.run([kaggle_bin,"kernels","output",KERNEL,"-p",str(tmp_dir)],check=True)
+    env = {**os.environ, "PYTHONIOENCODING": "utf-8"}
+    subprocess.run([kaggle_bin, "kernels", "output", KERNEL, "-p", str(tmp_dir)], check=True, env=env)
 
     DEST_DIR.mkdir(parents=True,exist_ok=True)
     src_run_dir = tmp_dir / "runs" / "train"
