@@ -1,4 +1,4 @@
-# Last updated: 2026-07-31
+# Last updated: 2026-08-02
 '''
 Gazebo 자체 렌더러로 YOLO 학습 데이터셋을 캡처한다.
 
@@ -33,6 +33,7 @@ Gazebo 파이썬 바인딩이 필요한데 프로젝트 .venv 밖에 있다. 최
 
 import math
 import os
+import random
 import subprocess
 import sys
 import time
@@ -95,6 +96,19 @@ DISTANCE_RATIOS = [0.5, 0.7, 1.0, 1.6, 3.0, 6.0]  # 캘리브레이션된 기준
 YAW_STEPS = 12
 MIN_BOX_PIXELS = 4  # 이보다 작은 박스(거의 안 보이는 프레임)는 노이즈로 버린다
 
+# 라벨 없는 배경 클러터용 정적 소품(자체 model.sdf가 있는 것만 — target_sdf의 PACKAGE_MESHES
+# 스폰 방식을 그대로 재사용). 실제 창고 화면(선반/기둥/박스 무더기)처럼 복잡한 배경에서도
+# 오탐지 없이 대상 클래스만 잡아내도록, 단일 오브젝트 캡처에는 없던 시각적 잡음을 넣어준다.
+CLUTTER_MESHES = [
+    "aws_robomaker_warehouse_ShelfD_01",
+    "aws_robomaker_warehouse_ShelfE_01",
+    "aws_robomaker_warehouse_WallB_01",
+]
+SCENE_OBJECT_COUNT = (2, 4)  # 씬 하나에 스폰할 라벨 대상 오브젝트 개수 범위(양끝 포함)
+SCENE_CLUTTER_COUNT = (2, 3)  # 씬 하나에 스폰할 무라벨 클러터 개수 범위(양끝 포함)
+SCENE_FOV_MARGIN = 0.8  # 오브젝트를 HFOV의 이 비율 안에 배치(가장자리 여유)
+NUM_SCENES = 150  # 멀티오브젝트 씬 개수(카메라 3대라 총 이미지는 NUM_SCENES*3)
+
 
 def semantic_class_of(mesh_name: str) -> str:
     if mesh_name in PACKAGE_MESHES:
@@ -103,8 +117,9 @@ def semantic_class_of(mesh_name: str) -> str:
 
 
 # 대상 오브젝트 하나를 스폰하는 SDF 조각을 만든다. class_id는 gz-sim-label-system 플러그인에
-# 그대로 박아서, boundingbox_camera가 이 오브젝트를 그 라벨로 리포트하게 한다.
-def target_sdf(mesh_name: str, class_id: int) -> str:
+# 그대로 박아서, boundingbox_camera가 이 오브젝트를 그 라벨로 리포트하게 한다. name을 바꿔주면
+# 한 월드에 여러 개를 동시에 스폰할 수 있다(멀티오브젝트 씬용).
+def target_sdf(mesh_name: str, class_id: int, name: str = "target", pose: str = "2 0 0 0 0 0") -> str:
     label_plugin = f"""
       <plugin filename="gz-sim-label-system" name="gz::sim::systems::Label">
         <label>{class_id}</label>
@@ -115,15 +130,15 @@ def target_sdf(mesh_name: str, class_id: int) -> str:
         return f"""
     <include>
       <uri>{mesh_uri}</uri>
-      <name>target</name>
-      <pose>2 0 0 0 0 0</pose>{label_plugin}
+      <name>{name}</name>
+      <pose>{pose}</pose>{label_plugin}
     </include>"""
 
     _, mesh_relpath, visual_pose = RAW_MESH_MESHES[mesh_name]
     return f"""
-    <model name="target">
+    <model name="{name}">
       <static>true</static>
-      <pose>2 0 0 0 0 0</pose>
+      <pose>{pose}</pose>
       <link name="link">
         <visual name="visual">
           <pose>{visual_pose}</pose>
@@ -135,10 +150,22 @@ def target_sdf(mesh_name: str, class_id: int) -> str:
     </model>"""
 
 
-# 클래스 하나 + 고정 카메라 3대짜리 일회용 Gazebo 월드의 SDF 문자열을 만든다. 카메라마다 RGB
-# 이미지용 camera 센서와, 자동 라벨용 boundingbox_camera 센서를 같은 pose로 짝지어 넣는다.
-def world_sdf(mesh_name: str, world_name: str, class_id: int) -> str:
-    cameras_xml = "\n".join(
+# CLUTTER_MESHES 중 하나를 라벨 없이 스폰하는 SDF 조각을 만든다 — boundingbox_camera가
+# Label 플러그인이 없는 오브젝트는 리포트하지 않으므로, 이 소품들은 배경 잡음으로만 작용한다.
+def clutter_sdf(mesh_name: str, name: str, pose: str) -> str:
+    mesh_uri = f"file://{SIM_MODELS_DIR}/{mesh_name}"
+    return f"""
+    <include>
+      <uri>{mesh_uri}</uri>
+      <name>{name}</name>
+      <pose>{pose}</pose>
+    </include>"""
+
+
+# 고정 카메라 3대(RGB + boundingbox_camera 쌍) SDF 조각 — 단일 오브젝트 월드와 멀티오브젝트
+# 씬 월드가 동일하게 재사용한다.
+def cameras_sdf() -> str:
+    return "\n".join(
         f"""
     <model name="{name}">
       <pose>0 0 {height} 0 0 0</pose>
@@ -171,6 +198,11 @@ def world_sdf(mesh_name: str, world_name: str, class_id: int) -> str:
     </model>"""
         for name, height in CAMERAS
     )
+
+
+# 월드 공통 껍데기(physics/plugin/조명/바닥) + 카메라 + 본문(단일 오브젝트든 멀티오브젝트 씬이든)을
+# 합쳐 완성한 SDF 문자열을 만든다.
+def base_world_sdf(world_name: str, body_xml: str) -> str:
     return f"""<?xml version="1.0"?>
 <sdf version="1.6">
   <world name="{world_name}">
@@ -199,25 +231,37 @@ def world_sdf(mesh_name: str, world_name: str, class_id: int) -> str:
         <visual name="v"><geometry><plane><normal>0 0 1</normal><size>10 10</size></plane></geometry></visual>
       </link>
     </model>
-{target_sdf(mesh_name, class_id)}
-{cameras_xml}
+{body_xml}
+{cameras_sdf()}
   </world>
 </sdf>
 """
 
 
-# set_pose 서비스를 호출해 대상 오브젝트를 (거리, 0, 높이) 위치로 옮기고 yaw만큼 회전시킨다.
-def set_target_pose(node: Node, world_name: str, distance: float, center_z: float, yaw: float) -> None:
+# 클래스 하나 + 고정 카메라 3대짜리 일회용 Gazebo 월드의 SDF 문자열을 만든다. 카메라마다 RGB
+# 이미지용 camera 센서와, 자동 라벨용 boundingbox_camera 센서를 같은 pose로 짝지어 넣는다.
+def world_sdf(mesh_name: str, world_name: str, class_id: int) -> str:
+    return base_world_sdf(world_name, target_sdf(mesh_name, class_id))
+
+
+# set_pose 서비스를 호출해 이름이 name인 오브젝트를 (x, y, z) 위치로 옮기고 yaw만큼 회전시킨다.
+def set_object_pose(node: Node, world_name: str, name: str, x: float, y: float, z: float, yaw: float) -> None:
     req = Pose()
-    req.name = "target"
-    req.position.x = distance
-    req.position.y = 0.0
-    req.position.z = center_z
+    req.name = name
+    req.position.x = x
+    req.position.y = y
+    req.position.z = z
     req.orientation.z = math.sin(yaw / 2)
     req.orientation.w = math.cos(yaw / 2)
     ok, _ = node.request(f"/world/{world_name}/set_pose", req, Pose, Boolean, 2000)
     if not ok:
-        raise RuntimeError("set_pose service call failed")
+        raise RuntimeError(f"set_pose service call failed for {name}")
+
+
+# 단일 오브젝트 월드에서 "target"이라는 이름의 오브젝트를 (거리, 0, 높이)로 옮기는
+# set_object_pose의 단축형 — calibrate_target/capture_mesh가 쓴다.
+def set_target_pose(node: Node, world_name: str, distance: float, center_z: float, yaw: float) -> None:
+    set_object_pose(node, world_name, "target", distance, 0.0, center_z, yaw)
 
 
 # 지정한 카메라 토픽에서 프레임 한 장을 구독해 받아오고, numpy 배열로 변환해 반환한다.
@@ -238,10 +282,9 @@ def capture_frame(node: Node, camera_topic: str, retries: int = 3) -> np.ndarray
     raise TimeoutError(f"no frame from {camera_topic} after {retries} attempts")
 
 
-# 지정한 boundingbox_camera 토픽에서 class_id 라벨이 붙은 박스를 찾아 YOLO 정규화 좌표로 반환한다.
-# gz-sim 렌더러가 직접 계산한 픽셀 박스이므로, 이 프로젝트는 더 이상 메시 half-extent를 투영
-# 계산하지 않는다.
-def capture_bbox(node: Node, bbox_topic: str, class_id: int) -> tuple | None:
+# 지정한 boundingbox_camera 토픽에서 메시지 하나를 구독해 받아온다(없으면 None) — capture_bbox와
+# capture_bbox_all이 공유하는 저수준 로직.
+def _read_bbox_msg(node: Node, bbox_topic: str) -> AnnotatedAxisAligned2DBox_V | None:
     received = {}
     node.subscribe(
         AnnotatedAxisAligned2DBox_V, f"/{bbox_topic}", lambda msg: received.setdefault("msg", msg)
@@ -250,22 +293,51 @@ def capture_bbox(node: Node, bbox_topic: str, class_id: int) -> tuple | None:
     while "msg" not in received and time.time() - t0 < 5:
         time.sleep(0.02)
     node.unsubscribe(f"/{bbox_topic}")
-    if "msg" not in received:
-        return None
+    return received.get("msg")
 
-    for annotated in received["msg"].annotated_box:
+
+def _normalize_box(annotated) -> tuple | None:
+    x_min = max(0.0, annotated.box.min_corner.x)
+    y_min = max(0.0, annotated.box.min_corner.y)
+    x_max = min(float(IMG_SIZE), annotated.box.max_corner.x)
+    y_max = min(float(IMG_SIZE), annotated.box.max_corner.y)
+    if x_max - x_min < MIN_BOX_PIXELS or y_max - y_min < MIN_BOX_PIXELS:
+        return None
+    box_cx, box_cy = (x_min + x_max) / 2 / IMG_SIZE, (y_min + y_max) / 2 / IMG_SIZE
+    box_w, box_h = (x_max - x_min) / IMG_SIZE, (y_max - y_min) / IMG_SIZE
+    return box_cx, box_cy, box_w, box_h
+
+
+# 지정한 boundingbox_camera 토픽에서 class_id 라벨이 붙은 박스를 찾아 YOLO 정규화 좌표로 반환한다.
+# gz-sim 렌더러가 직접 계산한 픽셀 박스이므로, 이 프로젝트는 더 이상 메시 half-extent를 투영
+# 계산하지 않는다. 단일 오브젝트 월드용(라벨이 하나뿐이라고 가정) — 여러 오브젝트가 동시에 있는
+# 씬에는 capture_bbox_all을 쓴다.
+def capture_bbox(node: Node, bbox_topic: str, class_id: int) -> tuple | None:
+    msg = _read_bbox_msg(node, bbox_topic)
+    if msg is None:
+        return None
+    for annotated in msg.annotated_box:
         if annotated.label != class_id:
             continue
-        x_min = max(0.0, annotated.box.min_corner.x)
-        y_min = max(0.0, annotated.box.min_corner.y)
-        x_max = min(float(IMG_SIZE), annotated.box.max_corner.x)
-        y_max = min(float(IMG_SIZE), annotated.box.max_corner.y)
-        if x_max - x_min < MIN_BOX_PIXELS or y_max - y_min < MIN_BOX_PIXELS:
-            continue
-        box_cx, box_cy = (x_min + x_max) / 2 / IMG_SIZE, (y_min + y_max) / 2 / IMG_SIZE
-        box_w, box_h = (x_max - x_min) / IMG_SIZE, (y_max - y_min) / IMG_SIZE
-        return box_cx, box_cy, box_w, box_h
+        box = _normalize_box(annotated)
+        if box is not None:
+            return box
     return None
+
+
+# 씬에 라벨 붙은 오브젝트가 여러 개 있을 때, 보이는 것 전부를 (class_id, cx, cy, w, h) 리스트로
+# 반환한다(멀티오브젝트 씬용). 라벨 없는 클러터 소품은 애초에 Label 플러그인이 없어 이 메시지에
+# 안 잡힌다.
+def capture_bbox_all(node: Node, bbox_topic: str) -> list[tuple]:
+    msg = _read_bbox_msg(node, bbox_topic)
+    if msg is None:
+        return []
+    results = []
+    for annotated in msg.annotated_box:
+        box = _normalize_box(annotated)
+        if box is not None:
+            results.append((annotated.label, *box))
+    return results
 
 
 # 메시 크기를 사람이 미리 재두지 않고, boundingbox_camera 피드백만 보면서 실시간으로
@@ -382,12 +454,167 @@ def capture_mesh(mesh_name: str, class_id: int) -> int:
         server.wait(timeout=10)
 
 
+# 멀티오브젝트 씬에 쓸 (center_z, base_distance)를 얻으려고, 이 메시 하나만 있는 임시 단일
+# 오브젝트 월드를 잠깐 띄워 calibrate_target()을 재사용한다.
+def calibrate_mesh(mesh_name: str) -> tuple[float, float]:
+    class_id = SEMANTIC_CLASSES.index(semantic_class_of(mesh_name))
+    world_name = f"calib_{mesh_name.lower()}"
+
+    WORLDS_DIR.mkdir(parents=True, exist_ok=True)
+    sdf_path = WORLDS_DIR / f"calib_{mesh_name}.sdf"
+    sdf_path.write_text(world_sdf(mesh_name, world_name, class_id))
+
+    env = os.environ.copy()
+    env["GZ_SIM_RESOURCE_PATH"] = f"{env.get('GZ_SIM_RESOURCE_PATH', '')}:{SIM_MODELS_DIR}"
+    log_path = OUT_DIR / "_worlds" / f"calib_{mesh_name}.log"
+    server = subprocess.Popen(
+        ["gz", "sim", "-s", "-r", str(sdf_path)],
+        stdout=open(log_path, "w"), stderr=subprocess.STDOUT, env=env,
+    )
+    try:
+        time.sleep(3)
+        node = Node()
+        return calibrate_target(node, world_name, class_id)
+    finally:
+        server.terminate()
+        server.wait(timeout=10)
+
+
+# 씬 하나에 스폰할 대상(라벨 있는) 오브젝트들을 무작위로 고르고 배치한다. 카메라 시야 안에서
+# 서로 다른 각도 슬롯에 하나씩 배정해 화면에 고르게 퍼지도록 하고(다 겹쳐서 한 덩어리로 안 보이게),
+# 거리는 DISTANCE_RATIOS 중 무작위로 골라 스케일 다양성도 그대로 유지한다.
+def random_scene_objects(calibration: dict[str, tuple[float, float]]) -> list[tuple]:
+    mesh_pool = list(calibration.keys())
+    n = random.randint(*SCENE_OBJECT_COUNT)
+    layout = []
+    for i in range(n):
+        mesh_name = random.choice(mesh_pool)
+        class_id = SEMANTIC_CLASSES.index(semantic_class_of(mesh_name))
+        center_z, base_distance = calibration[mesh_name]
+
+        slot_width = (HFOV * SCENE_FOV_MARGIN) / n
+        angle = -HFOV * SCENE_FOV_MARGIN / 2 + slot_width * (i + 0.5)
+        angle += random.uniform(-slot_width * 0.3, slot_width * 0.3)
+        distance = base_distance * random.choice(DISTANCE_RATIOS)
+
+        x, y = distance * math.cos(angle), distance * math.sin(angle)
+        yaw = random.uniform(0, 2 * math.pi)
+        layout.append((mesh_name, class_id, f"obj{i}", x, y, center_z, yaw))
+    return layout
+
+
+# 라벨 없는 배경 소품을 무작위로 흩뿌린다 — 대상 오브젝트보다 먼 거리에 배치해서 가리지 않게 한다.
+def random_scene_clutter() -> list[tuple]:
+    n = random.randint(*SCENE_CLUTTER_COUNT)
+    layout = []
+    for i in range(n):
+        mesh_name = random.choice(CLUTTER_MESHES)
+        distance = random.uniform(6.0, 12.0)
+        angle = random.uniform(-HFOV, HFOV)
+        yaw = random.uniform(0, 2 * math.pi)
+        x, y = distance * math.cos(angle), distance * math.sin(angle)
+        layout.append((mesh_name, f"clutter{i}", x, y, yaw))
+    return layout
+
+
+def multi_scene_sdf(objects: list[tuple], clutter: list[tuple], world_name: str) -> str:
+    objects_xml = "\n".join(
+        target_sdf(mesh_name, class_id, name, f"{x} {y} {z} 0 0 {yaw}")
+        for mesh_name, class_id, name, x, y, z, yaw in objects
+    )
+    clutter_xml = "\n".join(
+        clutter_sdf(mesh_name, name, f"{x} {y} 0 0 0 {yaw}") for mesh_name, name, x, y, yaw in clutter
+    )
+    return base_world_sdf(world_name, objects_xml + "\n" + clutter_xml)
+
+
+# 오브젝트 여러 개 + 배경 클러터를 무작위 배치한 씬 하나를 만들어 카메라 3대로 캡처한다. 단일
+# 오브젝트 캡처와 달리 이미지 한 장에 라벨이 여러 줄(오브젝트마다 한 줄) 있을 수 있다 —
+# boundingbox_camera가 리포트하는, 라벨 붙은 오브젝트 전부를 그대로 받아 적는다.
+def capture_multi_scene(scene_idx: int, calibration: dict[str, tuple[float, float]]) -> int:
+    objects = random_scene_objects(calibration)
+    clutter = random_scene_clutter()
+    world_name = f"scene_{scene_idx}"
+
+    WORLDS_DIR.mkdir(parents=True, exist_ok=True)
+    sdf_path = WORLDS_DIR / f"scene_{scene_idx:04d}.sdf"
+    sdf_path.write_text(multi_scene_sdf(objects, clutter, world_name))
+
+    env = os.environ.copy()
+    env["GZ_SIM_RESOURCE_PATH"] = f"{env.get('GZ_SIM_RESOURCE_PATH', '')}:{SIM_MODELS_DIR}"
+    log_path = OUT_DIR / "_worlds" / f"scene_{scene_idx:04d}.log"
+    server = subprocess.Popen(
+        ["gz", "sim", "-s", "-r", str(sdf_path)],
+        stdout=open(log_path, "w"), stderr=subprocess.STDOUT, env=env,
+    )
+    try:
+        time.sleep(3)  # 월드 로드 + 센서 플러그인 기동 대기(오브젝트는 스폰 시점 pose로 이미 배치됨)
+        node = Node()
+
+        images_dir = OUT_DIR / "_multi_scene" / "images"
+        labels_dir = OUT_DIR / "_multi_scene" / "labels"
+        images_dir.mkdir(parents=True, exist_ok=True)
+        labels_dir.mkdir(parents=True, exist_ok=True)
+
+        written = 0
+        for camera_topic, _ in CAMERAS:
+            boxes = capture_bbox_all(node, f"{camera_topic}_bbox")
+            if not boxes:
+                continue
+            try:
+                frame = capture_frame(node, camera_topic)
+            except TimeoutError as e:
+                print(f"  씬 {scene_idx:04d}/{camera_topic} 건너뜀: {e}")
+                continue
+            stem = f"scene_{scene_idx:04d}_{camera_topic}"
+            PILImage.fromarray(frame).save(images_dir / f"{stem}.png")
+            lines = [f"{cid} {cx:.6f} {cy:.6f} {w:.6f} {h:.6f}" for cid, cx, cy, w, h in boxes]
+            (labels_dir / f"{stem}.txt").write_text("\n".join(lines) + "\n")
+            written += 1
+        return written
+    finally:
+        server.terminate()
+        server.wait(timeout=10)
+
+
+# 대상 오브젝트+배경 클러터를 섞은 멀티오브젝트 씬을 num_scenes개 캡처한다(카메라 3대라 이미지는
+# 최대 num_scenes*3장). 메시별 (center_z, base_distance)는 한 번씩만 캘리브레이션해서 재사용—
+# 씬마다 다시 재는 게 아니라, 단일 오브젝트 캡처 때 이미 검증된 값을 그대로 가져다 쓰는 것.
+def capture_multi_scenes(num_scenes: int = NUM_SCENES) -> int:
+    print("멀티오브젝트 씬 캘리브레이션 중...")
+    calibration = {}
+    for mesh_name in TARGET_MESHES:
+        try:
+            calibration[mesh_name] = calibrate_mesh(mesh_name)
+        except Exception as e:
+            print(f"  {mesh_name} 캘리브레이션 실패, 씬 배치에서 제외: {e}")
+    if not calibration:
+        raise RuntimeError("모든 메시 캘리브레이션 실패 — 멀티오브젝트 씬을 만들 수 없음")
+
+    total = 0
+    for scene_idx in range(num_scenes):
+        try:
+            total += capture_multi_scene(scene_idx, calibration)
+        except Exception as e:
+            print(f"  씬 {scene_idx:04d} 실패: {e}")
+    return total
+
+
 # classes.txt(의미 클래스 목록)를 기록하고, 인자로 지정한 메시(없으면 전체)를 순서대로 캡처한다.
+# 인자를 하나도 안 주면(전체 실행) 단일 오브젝트 캡처가 끝난 뒤 멀티오브젝트 씬 캡처도 이어서
+# 한다 — 특정 메시 이름만 넘기면(부분 재실행) 멀티오브젝트 씬은 건너뛴다. "--multi"만 넘기면
+# 멀티오브젝트 씬만 캡처한다(단일 오브젝트 데이터는 이미 있는 상태에서 이것만 다시 만들 때 씀).
 def main() -> None:
     OUT_DIR.mkdir(parents=True, exist_ok=True)
     (OUT_DIR / "classes.txt").write_text("\n".join(SEMANTIC_CLASSES) + "\n")
 
-    meshes = sys.argv[1:] or TARGET_MESHES
+    args = sys.argv[1:]
+    if args == ["--multi"]:
+        count = capture_multi_scenes()
+        print(f"멀티오브젝트 씬: {count} images")
+        return
+
+    meshes = args or TARGET_MESHES
     for mesh_name in TARGET_MESHES:
         if mesh_name not in meshes:
             continue
@@ -400,6 +627,13 @@ def main() -> None:
             # 메시 하나가 통째로 실패해도(예: 캘리브레이션 실패) 나머지 메시는 계속 캡처한다 —
             # 이미 끝난 메시들 데이터를 날리고 처음부터 다시 돌릴 필요가 없게.
             print(f"{mesh_name} ({semantic_class}): 실패 — {e}")
+
+    if not args:
+        try:
+            count = capture_multi_scenes()
+            print(f"멀티오브젝트 씬: {count} images")
+        except Exception as e:
+            print(f"멀티오브젝트 씬 캡처 실패: {e}")
 
 
 if __name__ == "__main__":
