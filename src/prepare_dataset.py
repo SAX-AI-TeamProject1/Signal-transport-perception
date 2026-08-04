@@ -1,4 +1,4 @@
-# Last updated: 2026-08-02
+# Last updated: 2026-08-04
 '''
 capture_gazebo_dataset.py의 결과물을 YOLO train/val 데이터셋으로 분할한다.
 
@@ -30,6 +30,21 @@ TRAIN_RATIO = 0.8
 SEED = 42
 KAGGLE_DATASET_SLUG = "heojaeseong/yolo-gazebo-capture"
 
+# gz-sim의 boundingbox_camera가 가끔(관측상 카메라/클래스 안 가리고 ~4%) 투영에 실패해 박스를
+# 프레임 전체로 폴백해서 리포트하는 현상을 발견(2026-08-04) — 실제로는 화면 구석에 작게 있는
+# 오브젝트인데 라벨은 "화면 전체"로 찍힘. 원인(렌더러/플러그인 쪽 버그로 추정)을 고치는 대신,
+# 이런 라벨이 하나라도 섞인 이미지는 통째로 학습에서 제외한다 — 실제로 보이는 물체의 라벨만
+# 지우면 "이 물체는 배경이다"라고 잘못 가르치는 게 되므로, 이미지 전체를 버리는 게 더 안전하다.
+MAX_BOX_FRACTION = 0.95
+
+
+def _has_fullframe_fallback_label(label_path: Path) -> bool:
+    for line in label_path.read_text().splitlines():
+        _, _, _, w, h = line.split()
+        if float(w) > MAX_BOX_FRACTION and float(h) > MAX_BOX_FRACTION:
+            return True
+    return False
+
 
 # capture_gazebo_dataset.py가 써둔 classes.txt에서 클래스 이름 목록(=클래스 ID 순서)을 읽는다.
 def read_class_names() -> list[str]:
@@ -41,21 +56,34 @@ def read_class_names() -> list[str]:
 # 여러 메시가 같은 의미 클래스로 합쳐질 수 있어서(capture_gazebo_dataset.py 참고), 폴더명이
 # 아니라 라벨 파일에 이미 적힌 class_id로 클래스를 구분한다.
 #
-# _multi_scene(멀티오브젝트 씬, capture_gazebo_dataset.py의 capture_multi_scenes 참고)만 예외 —
-# 라벨 파일 한 장에 서로 다른 class_id가 여러 줄 섞여 있을 수 있어서 "첫 줄 class_id"로 묶는 게
-# 의미가 없다. 이런 파일은 "multi_scene"이라는 별도 그룹 키 하나로 묶어서 그 그룹 안에서만
-# train/val 비율을 지킨다(개별 class_id별 균형은 신경 쓰지 않음 — 이미 단일 오브젝트 캡처가
-# 클래스별 균형을 잡아주고 있어서, 멀티오브젝트 씬은 "몇 개가 동시에 나오는가" 다양성이 목적).
+# _multi_scene(멀티오브젝트 씬, capture_gazebo_dataset.py의 capture_multi_scenes 참고)과
+# _navi_factory(실제 배포 월드에서 트랙을 따라 캡처, capture_navi_factory_dataset.py 참고)만 예외 —
+# 라벨 파일 한 장에 서로 다른 class_id가 여러 줄 섞여 있을 수 있고(멀티오브젝트) 빈 라벨(순수
+# 배경 hard negative, navi_factory)도 있어서 "첫 줄 class_id"로 묶는 게 의미가 없다. 이런 폴더는
+# 폴더명을 그대로 그룹 키로 써서 그 그룹 안에서만 train/val 비율을 지킨다(개별 class_id별 균형은
+# 신경 쓰지 않음 — 단일 오브젝트 캡처가 이미 클래스별 균형을 잡아주고 있어서, 이 그룹들은 "장면
+# 다양성"이 목적).
+MULTI_LABEL_DIRS = {"_multi_scene", "_navi_factory"}
+
+
 def collect_all_pairs() -> list[tuple[Path, Path, str]]:
     pairs = []
     for mesh_dir in sorted(RAW_DIR.iterdir()):
         if not mesh_dir.is_dir() or mesh_dir.name == "_worlds":
             continue
         images_dir, labels_dir = mesh_dir / "images", mesh_dir / "labels"
-        is_multi_scene = mesh_dir.name == "_multi_scene"
+        group_key = mesh_dir.name if mesh_dir.name in MULTI_LABEL_DIRS else None
         for image_path in sorted(images_dir.glob("*.png")):
             label_path = labels_dir / f"{image_path.stem}.txt"
-            class_id = "multi_scene" if is_multi_scene else label_path.read_text().split()[0]
+            if _has_fullframe_fallback_label(label_path):
+                continue
+            if group_key is not None:
+                class_id = group_key
+            else:
+                text = label_path.read_text().split()
+                if not text:
+                    continue  # 단일 오브젝트 캡처 폴더에 빈 라벨은 없어야 정상 — 방어적으로 스킵
+                class_id = text[0]
             pairs.append((image_path, label_path, class_id))
     return pairs
 

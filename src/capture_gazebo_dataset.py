@@ -1,4 +1,4 @@
-# Last updated: 2026-08-02
+# Last updated: 2026-08-03
 '''
 Gazebo 자체 렌더러로 YOLO 학습 데이터셋을 캡처한다.
 
@@ -75,6 +75,11 @@ RAW_MESH_MESHES = {
     "WalkingPerson": ("Person", "WalkingPerson/meshes/walking.dae", "0 0 0.02 0.04 0 0"),
     "CasualFemale": ("Person", "CasualFemale/meshes/casual_female.dae", "0 0 0.02 0.04 0 0"),
     "Forklift": ("Vehicle", "Forklift/base_visual.glb", "0 0 0 0 0 0"),
+    # navi_factory.sdf가 실제로 <actor> 애니메이션(걷는 방문객 7명)에 쓰는 메시 두 종 — 애니메이션
+    # 자체는 재현하지 않고 이 메시를 정지 포즈로 스폰만 한다(단일 프레임 캡처라 걷는 동작 자체는
+    # 필요 없음). visual pose는 다른 사람 메시들과 동일하게 지면 보정만 준다.
+    "MaleVisitor": ("Person", "MaleVisitor/meshes/MaleVisitorWalk.dae", "0 0 0.02 0.04 0 0"),
+    "FemaleVisitorWalk": ("Person", "FemaleVisitorWalk/meshes/FemaleVisitorWalk.dae", "0 0 0.02 0.04 0 0"),
 }
 
 TARGET_MESHES = list(PACKAGE_MESHES) + list(RAW_MESH_MESHES)
@@ -85,7 +90,18 @@ SEMANTIC_CLASSES = ["PalletJack", "Bucket", "Cluttering", "TrashCan", "Person", 
 
 IMG_SIZE = 640
 HFOV = 1.05  # 라디안 — 아래 SDF의 카메라 <horizontal_fov>와 반드시 일치해야 함
-CAMERAS = [("camera_low", 0.6), ("camera_mid", 1.0), ("camera_high", 1.5)]
+# (name, height, pitch) — pitch는 라디안, 양수면 아래로 기울임(navi_factory.sdf GUI 기본 조감뷰의
+# <camera_pose>...1.006...> 부호와 동일 convention). 단일 오브젝트 캘리브레이션/스윕(capture_mesh)은
+# 이 3대(지상 레벨 촬영)만 쓴다 — 캘리브레이션이 camera_mid 기준 눈높이를 가정하고 있어서, 아래로
+# 꺾인 카메라를 섞으면 물체가 프레임 밖으로 벗어나거나 캘리브레이션이 어긋날 수 있다.
+CAMERAS = [("camera_low", 0.6, 0.0), ("camera_mid", 1.0, 0.0), ("camera_high", 1.5, 0.0)]
+# navi_factory.sdf GUI 기본 조감뷰(0 48 24, pitch 1.006)처럼 로봇 카메라가 아닌 "관제/모니터링"
+# 각도까지 학습에 포함시키기 위한 광각 카메라 — 멀티오브젝트 씬(capture_multi_scene)에서만 쓴다.
+# 높이/피치는 시작값이고, 파일럿 캡처 이미지를 test_picture와 비교하며 튜닝할 것.
+OVERVIEW_CAMERA = ("camera_overview", 10.0, 0.6)
+MULTI_SCENE_CAMERAS = CAMERAS + [OVERVIEW_CAMERA]  # 멀티오브젝트 씬은 지상 3대 + 조감 1대
+ALL_CAMERAS = MULTI_SCENE_CAMERAS  # 월드 SDF에는 항상 다 심어둔다 — capture_mesh는 그중 3개만 구독
+CAMERA_HEIGHTS = {name: height for name, height, _ in ALL_CAMERAS}
 CALIBRATION_CAMERA = "camera_mid"  # 거리/높이 캘리브레이션 기준 카메라
 TARGET_FILL = 0.5  # 캘리브레이션 목표: 박스 세로 길이가 프레임의 이 비율을 채우도록
 DISTANCE_RATIOS = [0.5, 0.7, 1.0, 1.6, 3.0, 6.0]  # 캘리브레이션된 기준 거리에 대한 근~원 배율
@@ -103,11 +119,26 @@ CLUTTER_MESHES = [
     "aws_robomaker_warehouse_ShelfD_01",
     "aws_robomaker_warehouse_ShelfE_01",
     "aws_robomaker_warehouse_WallB_01",
+    "shelf_big",  # navi_factory.sdf가 실제로 쓰는 대형 선반(shelf_big_east_1 등) — model.sdf 있음
 ]
+
+# model.sdf 없는 raw mesh 클러터(하드 네거티브) — navi_factory.sdf에서 실제로 오탐지를 유발한
+# ControlConsole("포장기계"로 보이던 소품)/ElectricalPanelBareModel을 그대로 가져온다. 학습이
+# 한 번도 못 본 물체를 가장 비슷한 학습 클래스로 욱여넣어 분류하던 게 오탐지 원인이었으므로,
+# 이 소품들을 라벨 없이 노출시켜 "이건 어떤 클래스도 아니다"를 배우게 한다. (mesh 상대경로,
+# visual pose, mesh scale) — scale은 navi_factory.sdf의 실제 배치값(1.5배)을 그대로 가져옴.
+HARD_NEGATIVE_MESHES = {
+    "ControlConsole": ("ControlConsole/meshes/console.dae", "0 0 0 0 0 0", 1.5),
+    "ElectricalPanelBareModel": (
+        "ElectricalPanelBareModel/meshes/Underwater-Frame.dae", "0 0 0 0 0 1.5708", 1.5,
+    ),
+}
 SCENE_OBJECT_COUNT = (2, 4)  # 씬 하나에 스폰할 라벨 대상 오브젝트 개수 범위(양끝 포함)
 SCENE_CLUTTER_COUNT = (2, 3)  # 씬 하나에 스폰할 무라벨 클러터 개수 범위(양끝 포함)
 SCENE_FOV_MARGIN = 0.8  # 오브젝트를 HFOV의 이 비율 안에 배치(가장자리 여유)
-NUM_SCENES = 150  # 멀티오브젝트 씬 개수(카메라 3대라 총 이미지는 NUM_SCENES*3)
+NUM_SCENES = 250  # 멀티오브젝트 씬 개수(MULTI_SCENE_CAMERAS 4대라 총 이미지는 최대 NUM_SCENES*4).
+# ADR-013의 150에서 늘림 — 창고 배경/하드 네거티브 클러터/조감 카메라가 새로 추가되면서 씬 조합
+# 다양성 자체가 커져서, 같은 150개로는 새 조합들을 고루 못 볼 수 있어서다.
 
 
 def semantic_class_of(mesh_name: str) -> str:
@@ -150,9 +181,29 @@ def target_sdf(mesh_name: str, class_id: int, name: str = "target", pose: str = 
     </model>"""
 
 
-# CLUTTER_MESHES 중 하나를 라벨 없이 스폰하는 SDF 조각을 만든다 — boundingbox_camera가
-# Label 플러그인이 없는 오브젝트는 리포트하지 않으므로, 이 소품들은 배경 잡음으로만 작용한다.
+# CLUTTER_MESHES/HARD_NEGATIVE_MESHES 중 하나를 라벨 없이 스폰하는 SDF 조각을 만든다 —
+# boundingbox_camera가 Label 플러그인이 없는 오브젝트는 리포트하지 않으므로, 이 소품들은 배경
+# 잡음으로만 작용한다. target_sdf()와 동일하게 package(model.sdf 있음)/raw mesh 두 갈래를 쓴다.
 def clutter_sdf(mesh_name: str, name: str, pose: str) -> str:
+    if mesh_name in HARD_NEGATIVE_MESHES:
+        mesh_relpath, visual_pose, scale = HARD_NEGATIVE_MESHES[mesh_name]
+        return f"""
+    <model name="{name}">
+      <static>true</static>
+      <pose>{pose}</pose>
+      <link name="link">
+        <visual name="visual">
+          <pose>{visual_pose}</pose>
+          <geometry>
+            <mesh>
+              <scale>{scale} {scale} {scale}</scale>
+              <uri>model://{mesh_relpath}</uri>
+            </mesh>
+          </geometry>
+        </visual>
+      </link>
+    </model>"""
+
     mesh_uri = f"file://{SIM_MODELS_DIR}/{mesh_name}"
     return f"""
     <include>
@@ -162,13 +213,15 @@ def clutter_sdf(mesh_name: str, name: str, pose: str) -> str:
     </include>"""
 
 
-# 고정 카메라 3대(RGB + boundingbox_camera 쌍) SDF 조각 — 단일 오브젝트 월드와 멀티오브젝트
-# 씬 월드가 동일하게 재사용한다.
+# 고정 카메라 ALL_CAMERAS(RGB + boundingbox_camera 쌍) SDF 조각 — 단일 오브젝트 월드와
+# 멀티오브젝트 씬 월드가 동일하게 재사용한다. 물리적으로는 모든 월드에 4대(지상 3대 + 조감 1대)가
+# 다 심어지지만, capture_mesh()는 그중 지상 3대(CAMERAS)만 구독한다 — 안 쓰는 조감 카메라가 있어도
+# 렌더 비용만 조금 늘 뿐 해는 없다.
 def cameras_sdf() -> str:
     return "\n".join(
         f"""
     <model name="{name}">
-      <pose>0 0 {height} 0 0 0</pose>
+      <pose>0 0 {height} 0 {pitch} 0</pose>
       <static>true</static>
       <link name="link">
         <sensor name="cam" type="camera">
@@ -196,13 +249,45 @@ def cameras_sdf() -> str:
         </sensor>
       </link>
     </model>"""
-        for name, height in CAMERAS
+        for name, height, pitch in ALL_CAMERAS
     )
 
 
+# navi_factory.sdf의 창고 건물 메시(기둥/벽/바닥이 통째로 구워진 단일 메시)를 라벨 없는 정적
+# 배경으로 그대로 복제해 넣는다 — navi_factory.sdf 자체는 여전히 읽거나 쓰지 않는다(같은
+# SIM_MODELS_DIR 애셋을 우리 즉석 월드에서도 참조하는 것뿐). scale/pose는 navi_factory.sdf의
+# 실제 배치값과 동일하게 맞췄다 — 기둥을 낱개 애셋으로 뽑아 쓸 수 없어(건물 메시에 구워짐),
+# 배경으로 통째로 포함하는 게 유일한 방법이다.
+WAREHOUSE_BACKDROP_SDF = """
+    <model name="warehouse_backdrop">
+      <static>true</static>
+      <pose>0 0 -0.1002 0 0 0</pose>
+      <link name="link">
+        <visual name="visual">
+          <geometry>
+            <mesh>
+              <scale>2 2 2</scale>
+              <uri>model://warehouse_mohamedazimal27_2x/meshes/warehouse.dae</uri>
+            </mesh>
+          </geometry>
+        </visual>
+      </link>
+    </model>"""
+
+
 # 월드 공통 껍데기(physics/plugin/조명/바닥) + 카메라 + 본문(단일 오브젝트든 멀티오브젝트 씬이든)을
-# 합쳐 완성한 SDF 문자열을 만든다.
-def base_world_sdf(world_name: str, body_xml: str) -> str:
+# 합쳐 완성한 SDF 문자열을 만든다. include_ground=False면 단순 평면 바닥 대신 호출자가 body_xml에
+# 이미 넣어둔 실제 배경(WAREHOUSE_BACKDROP_SDF 등)을 쓴다는 뜻 — 평면과 창고 메시 바닥이 겹쳐
+# z-fighting 나는 것을 피하기 위함.
+def base_world_sdf(world_name: str, body_xml: str, include_ground: bool = True) -> str:
+    ground_xml = """
+    <model name="ground">
+      <static>true</static>
+      <link name="link">
+        <collision name="c"><geometry><plane><normal>0 0 1</normal></plane></geometry></collision>
+        <visual name="v"><geometry><plane><normal>0 0 1</normal><size>10 10</size></plane></geometry></visual>
+      </link>
+    </model>""" if include_ground else ""
     return f"""<?xml version="1.0"?>
 <sdf version="1.6">
   <world name="{world_name}">
@@ -223,14 +308,7 @@ def base_world_sdf(world_name: str, body_xml: str) -> str:
       <direction>-0.3 0.3 -0.9</direction>
       <diffuse>0.9 0.9 0.9 1</diffuse>
       <specular>0.2 0.2 0.2 1</specular>
-    </light>
-    <model name="ground">
-      <static>true</static>
-      <link name="link">
-        <collision name="c"><geometry><plane><normal>0 0 1</normal></plane></geometry></collision>
-        <visual name="v"><geometry><plane><normal>0 0 1</normal><size>10 10</size></plane></geometry></visual>
-      </link>
-    </model>
+    </light>{ground_xml}
 {body_xml}
 {cameras_sdf()}
   </world>
@@ -238,8 +316,9 @@ def base_world_sdf(world_name: str, body_xml: str) -> str:
 """
 
 
-# 클래스 하나 + 고정 카메라 3대짜리 일회용 Gazebo 월드의 SDF 문자열을 만든다. 카메라마다 RGB
-# 이미지용 camera 센서와, 자동 라벨용 boundingbox_camera 센서를 같은 pose로 짝지어 넣는다.
+# 클래스 하나 + 고정 카메라(ALL_CAMERAS, capture_mesh는 그중 지상 3대만 씀)짜리 일회용 Gazebo
+# 월드의 SDF 문자열을 만든다. 카메라마다 RGB 이미지용 camera 센서와, 자동 라벨용
+# boundingbox_camera 센서를 같은 pose로 짝지어 넣는다.
 def world_sdf(mesh_name: str, world_name: str, class_id: int) -> str:
     return base_world_sdf(world_name, target_sdf(mesh_name, class_id))
 
@@ -346,7 +425,7 @@ def capture_bbox_all(node: Node, bbox_topic: str) -> list[tuple]:
 #   2) 박스가 세로 중앙에 오도록 높이를 보정한다(원근 비례로 근사 조정, 몇 번 반복해 수렴).
 #   3) 박스 세로 길이가 TARGET_FILL 비율이 되도록 거리를 다시 맞춘다.
 def calibrate_target(node: Node, world_name: str, class_id: int) -> tuple[float, float]:
-    camera_z = dict(CAMERAS)[CALIBRATION_CAMERA]
+    camera_z = CAMERA_HEIGHTS[CALIBRATION_CAMERA]
     bbox_topic = f"{CALIBRATION_CAMERA}_bbox"
     z = camera_z  # 초기 추정치: 기준 카메라 높이 근처에서 시작
     distance = 8.0
@@ -420,7 +499,7 @@ def capture_mesh(mesh_name: str, class_id: int) -> int:
 
         written = 0
         idx = 0
-        for camera_topic, _ in CAMERAS:
+        for camera_topic, _, _ in CAMERAS:
             for ratio in DISTANCE_RATIOS:
                 distance = ratio * base_distance
                 for step in range(YAW_STEPS):
@@ -504,11 +583,16 @@ def random_scene_objects(calibration: dict[str, tuple[float, float]]) -> list[tu
 
 
 # 라벨 없는 배경 소품을 무작위로 흩뿌린다 — 대상 오브젝트보다 먼 거리에 배치해서 가리지 않게 한다.
+# CLUTTER_MESHES(선반류) + HARD_NEGATIVE_MESHES(포장기계류)를 한 풀로 섞어서, 매 씬마다 둘 다
+# 나올 수 있게 한다.
+CLUTTER_POOL = CLUTTER_MESHES + list(HARD_NEGATIVE_MESHES)
+
+
 def random_scene_clutter() -> list[tuple]:
     n = random.randint(*SCENE_CLUTTER_COUNT)
     layout = []
     for i in range(n):
-        mesh_name = random.choice(CLUTTER_MESHES)
+        mesh_name = random.choice(CLUTTER_POOL)
         distance = random.uniform(6.0, 12.0)
         angle = random.uniform(-HFOV, HFOV)
         yaw = random.uniform(0, 2 * math.pi)
@@ -525,10 +609,12 @@ def multi_scene_sdf(objects: list[tuple], clutter: list[tuple], world_name: str)
     clutter_xml = "\n".join(
         clutter_sdf(mesh_name, name, f"{x} {y} 0 0 0 {yaw}") for mesh_name, name, x, y, yaw in clutter
     )
-    return base_world_sdf(world_name, objects_xml + "\n" + clutter_xml)
+    body = WAREHOUSE_BACKDROP_SDF + "\n" + objects_xml + "\n" + clutter_xml
+    return base_world_sdf(world_name, body, include_ground=False)
 
 
-# 오브젝트 여러 개 + 배경 클러터를 무작위 배치한 씬 하나를 만들어 카메라 3대로 캡처한다. 단일
+# 오브젝트 여러 개 + 배경 클러터를 무작위 배치한 씬 하나를 만들어 MULTI_SCENE_CAMERAS(지상 3대 +
+# 조감 1대)로 캡처한다. 단일
 # 오브젝트 캡처와 달리 이미지 한 장에 라벨이 여러 줄(오브젝트마다 한 줄) 있을 수 있다 —
 # boundingbox_camera가 리포트하는, 라벨 붙은 오브젝트 전부를 그대로 받아 적는다.
 def capture_multi_scene(scene_idx: int, calibration: dict[str, tuple[float, float]]) -> int:
@@ -557,7 +643,7 @@ def capture_multi_scene(scene_idx: int, calibration: dict[str, tuple[float, floa
         labels_dir.mkdir(parents=True, exist_ok=True)
 
         written = 0
-        for camera_topic, _ in CAMERAS:
+        for camera_topic, _, _ in MULTI_SCENE_CAMERAS:
             boxes = capture_bbox_all(node, f"{camera_topic}_bbox")
             if not boxes:
                 continue
@@ -577,8 +663,8 @@ def capture_multi_scene(scene_idx: int, calibration: dict[str, tuple[float, floa
         server.wait(timeout=10)
 
 
-# 대상 오브젝트+배경 클러터를 섞은 멀티오브젝트 씬을 num_scenes개 캡처한다(카메라 3대라 이미지는
-# 최대 num_scenes*3장). 메시별 (center_z, base_distance)는 한 번씩만 캘리브레이션해서 재사용—
+# 대상 오브젝트+배경 클러터를 섞은 멀티오브젝트 씬을 num_scenes개 캡처한다(MULTI_SCENE_CAMERAS
+# 4대라 이미지는 최대 num_scenes*4장). 메시별 (center_z, base_distance)는 한 번씩만 캘리브레이션해서 재사용—
 # 씬마다 다시 재는 게 아니라, 단일 오브젝트 캡처 때 이미 검증된 값을 그대로 가져다 쓰는 것.
 def capture_multi_scenes(num_scenes: int = NUM_SCENES) -> int:
     print("멀티오브젝트 씬 캘리브레이션 중...")
